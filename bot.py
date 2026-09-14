@@ -2,20 +2,53 @@ import os
 import asyncio
 import imageio_ffmpeg
 from pyrogram import Client, filters
+from pyrogram.errors import UserNotParticipant
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
 
 API_ID = 33133014
 API_HASH = "fa7e20bfaa94f3901adbbc6c082c1c77"
 BOT_TOKEN = "8721027576:AAGvAWmFvoyrOdBQ8FTSeTFpbIQX-5WmitI"
 
+CHANNEL_USERNAME = "ht4h4"
+
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+async def check_membership(client, user_id):
+    try:
+        member = await client.get_chat_member(CHANNEL_USERNAME, user_id)
+        if member.status in ["member", "administrator", "owner"]:
+            return True
+        return False
+    except UserNotParticipant:
+        return False
+    except Exception:
+        return True
+
+def force_sub_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME}")]
+    ])
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
+    if not await check_membership(client, message.from_user.id):
+        await message.reply_text(
+            "⚠️ عذراً، يجب عليك الإشتراك في قناة البوت أولاً لاستخدامه!",
+            reply_markup=force_sub_keyboard()
+        )
+        return
     await message.reply_text("أهلاً بك! أرسل لي أي رابط وسأنزله لك بأعلى دقة متوفرة 🔥")
 
 @app.on_message(filters.text & ~filters.command(["start", "help"]))
 async def download_media(client, message):
+    if not await check_membership(client, message.from_user.id):
+        await message.reply_text(
+            "⚠️ عذراً، يجب عليك الإشتراك في قناة البوت أولاً لتتمكن من التحميل!",
+            reply_markup=force_sub_keyboard()
+        )
+        return
+
     url = message.text.strip()
     if not url.startswith("http"):
         return
