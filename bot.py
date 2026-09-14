@@ -2,6 +2,7 @@ import os
 import asyncio
 import imageio_ffmpeg
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import UserNotParticipant
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
@@ -14,21 +15,34 @@ CHANNEL_USERNAME = "ht4h4"
 
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# دالة التحقق من الاشتراك الدقيقة
 async def check_membership(client, user_id):
     try:
-        member = await client.get_chat_member(CHANNEL_USERNAME, user_id)
-        if member.status in ["member", "administrator", "owner"]:
+        chat = f"@{CHANNEL_USERNAME}"
+        member = await client.get_chat_member(chat, user_id)
+        # السماح للعضو، الأدمن، أو منشئ القناة (المالك)
+        if member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
             return True
         return False
     except UserNotParticipant:
         return False
-    except Exception:
-        return True
+    except Exception as e:
+        print(f"Error checking membership: {e}")
+        return True  # في حال حدوث أي خطأ في الوصول لا يتم حظر المستخدم
 
 def force_sub_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME}")]
+        [InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME}")],
+        [InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")]
     ])
+
+@app.on_callback_query(filters.regex("check_sub"))
+async def check_callback(client, callback_query):
+    if await check_membership(client, callback_query.from_user.id):
+        await callback_query.message.delete()
+        await callback_query.message.reply_text("✅ تم التحقق من اشتراكك بنجاح! أرسل رابط الفيديو الآن وسأنزله لك 🔥")
+    else:
+        await callback_query.answer("⚠️ أنت غير مشترك في القناة بعد! اشترك ثم اضغط تحقق.", show_alert=True)
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
