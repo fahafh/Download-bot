@@ -1,4 +1,4 @@
-import os
+hereimport os
 import asyncio
 from pyrogram import Client, filters
 import yt_dlp
@@ -28,6 +28,11 @@ async def download_media(client, message):
         'concurrent_fragment_downloads': 5,
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        }
     }
 
     try:
