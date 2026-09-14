@@ -1,5 +1,6 @@
 import os
 import asyncio
+import imageio_ffmpeg
 from pyrogram import Client, filters
 import yt_dlp
 
@@ -22,6 +23,7 @@ async def download_media(client, message):
     msg = await message.reply_text("⏳ جاري سحب الفيديو بأعلى جودة ممكنة...")
 
     ydl_opts = {
+        'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
         'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
         'outtmpl': 'downloads/%(title)s.%(ext)s',
         'merge_output_format': 'mp4',
