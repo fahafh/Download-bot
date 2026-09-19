@@ -108,6 +108,7 @@ async def download_media(client, message):
 
     url = message.text.strip()
     if not url.startswith("http"):
+        await message.reply_text("❌ أرسل رابط صحيح يبدأ بـ http أو https")
         return
 
     msg = await message.reply_text("⏳ جاري سحب الفيديو بأعلى جودة ممكنة...")
@@ -187,80 +188,4 @@ if __name__ == "__main__":
     if not HAS_COOKIES:
         logger.warning("⚠️ ملف cookies.txt غير موجود - تحميل انستغرام لن يعمل بشكل صحيح")
     logger.info("🚀 البوت شغال الآن بنجاح...")
-    app.run()    # تحقق من أن النص رابط
-    if not (url.startswith("http://") or url.startswith("https://")):
-        await message.reply_text("❌ أرسل رابط صحيح يبدأ بـ http أو https")
-        return
-    
-    # رسالة جاري التحميل
-    status_message = await message.reply_text("⏳ جاري التحميل... انتظر قليلاً")
-    
-    try:
-        # إعدادات yt-dlp
-        ydl_opts = {
-            'format': 'best[height<=720]/best',
-            'outtmpl': os.path.join(DOWNLOAD_PATH, '%(title)s.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'socket_timeout': 30,
-            'http_chunk_size': 1024 * 1024,
-        }
-        
-        # تحميل الفيديو
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            logger.info(f"تحميل الفيديو من: {url}")
-            info = ydl.extract_info(url, download=True)
-            video_path = ydl.prepare_filename(info)
-        
-        # التحقق من أن الملف موجود
-        if not os.path.exists(video_path):
-            await status_message.edit_text("❌ فشل التحميل: الملف لم يُحفظ")
-            return
-        
-        # حجم الملف
-        file_size = os.path.getsize(video_path)
-        
-        # إذا كان أكبر من 2GB
-        if file_size > 2 * 1024 * 1024 * 1024:
-            os.remove(video_path)
-            await status_message.edit_text("❌ حجم الملف كبير جداً (أكثر من 2GB)")
-            return
-        
-        # إرسال الفيديو
-        await status_message.edit_text("📤 جاري إرسال الفيديو...")
-        
-        await message.reply_video(
-            video=open(video_path, 'rb'),
-            caption=f"✅ تم التحميل بنجاح!\n\n📝 العنوان: {info.get('title', 'بدون عنوان')}"
-        )
-        
-        # حذف الملف بعد الإرسال
-        await status_message.delete()
-        os.remove(video_path)
-        logger.info(f"تم إرسال الفيديو بنجاح")
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"خطأ في التحميل: {error_msg}")
-        
-        # رسائل خطأ مخصصة
-        if "No video formats" in error_msg or "Instagram" in error_msg:
-            await status_message.edit_text(
-                "❌ لا يمكن تحميل من هذا الموقع\n"
-                "حاول مع موقع آخر مثل YouTube أو TikTok"
-            )
-        elif "403" in error_msg or "404" in error_msg:
-            await status_message.edit_text(
-                "❌ الرابط غير صحيح أو محذوف"
-            )
-        else:
-            await status_message.edit_text(
-                f"❌ حدث خطأ:\n{error_msg[:100]}"
-            )
-
-# ============================================
-# تشغيل البوت
-# ============================================
-if __name__ == "__main__":
-    logger.info("🚀 البوت يعمل الآن...")
     app.run()
