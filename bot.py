@@ -1,6 +1,9 @@
 import os
+import re
 import asyncio
 import logging
+import http.cookiejar
+import requests
 import imageio_ffmpeg
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
@@ -39,6 +42,11 @@ COOKIES_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIES_FILE)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -123,55 +131,48 @@ def build_video_opts():
     return opts
 
 
-def get_info(url):
-    """يجيب معلومات الرابط بدون تحميل، عشان نعرف نوع المحتوى (فيديو/صورة/ألبوم)"""
-    opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-    }
+def get_requests_session():
+    """يجهز جلسة requests فيها كوكيز انستغرام (لو موجودة) عشان نقدر نفتح منشورات خاصة"""
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
     if HAS_COOKIES:
-        opts['cookiefile'] = COOKIES_FILE
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
+        jar = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+        except Exception as e:
+            logger.error(f"فشل تحميل الكوكيز: {e}")
+    return session
 
 
-def collect_image_urls(info):
-    """يستخرج روابط الصور من منشور (صورة واحدة أو ألبوم كاروسيل)"""
-    urls = []
+def fetch_instagram_images(url):
+    """
+    يجيب روابط الصور من منشور انستغرام (صورة وحدة أو ألبوم كاروسيل)
+    عن طريق تحليل كود الصفحة مباشرة بدل الاعتماد على yt-dlp
+    """
+    session = get_requests_session()
+    resp = session.get(url, timeout=20)
+    resp.raise_for_status()
+    html = resp.text
 
-    def extract_from_entry(entry):
-        # لو عنده صيغ (formats)، خذ أعلى جودة صورة متوفرة
-        if entry.get('formats'):
-            image_formats = [f for f in entry['formats'] if f.get('url')]
-            if image_formats:
-                return image_formats[-1]['url']
-        if entry.get('url'):
-            return entry['url']
-        if entry.get('thumbnail'):
-            return entry['thumbnail']
-        return None
+    # نبحث عن كل روابط الصور عالية الجودة المذكورة بكود الصفحة (display_url)
+    raw_urls = re.findall(r'"display_url":"(https:[^"]+?)"', html)
 
-    if info.get('entries'):
-        for entry in info['entries']:
-            img = extract_from_entry(entry)
-            if img:
-                urls.append(img)
-    else:
-        img = extract_from_entry(info)
-        if img:
-            urls.append(img)
+    # تنظيف الروابط من الـ escape characters
+    clean_urls = []
+    seen = set()
+    for u in raw_urls:
+        clean = u.encode().decode('unicode_escape')
+        clean = clean.replace('\\/', '/')
+        if clean not in seen:
+            seen.add(clean)
+            clean_urls.append(clean)
 
-    return urls
+    return clean_urls
 
 
-def is_video_entry(entry):
-    """يتحقق هل هذا العنصر فيديو فعلي (عنده صيغة فيها فيديو)"""
-    formats = entry.get('formats') or []
-    for f in formats:
-        if f.get('vcodec') and f.get('vcodec') != 'none':
-            return True
-    return entry.get('ext') in ('mp4', 'webm', 'mkv', 'mov')
+def is_instagram_url(url):
+    return "instagram.com" in url.lower()
 
 
 @app.on_message(filters.text & ~filters.command(["start", "help"]))
@@ -188,29 +189,22 @@ async def download_media(client, message):
         await message.reply_text("❌ أرسل رابط صحيح يبدأ بـ http أو https")
         return
 
-    msg = await message.reply_text("⏳ جاري تحليل الرابط...")
+    msg = await message.reply_text("⏳ جاري سحب المحتوى بأعلى جودة ممكنة...")
 
     file_path = None
     try:
-        # الخطوة 1: نجيب معلومات المحتوى بدون تحميل عشان نعرف نوعه
         loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, get_info, url)
+        ydl_opts = build_video_opts()
 
-        has_entries = bool(info.get('entries'))
-        single_is_video = (not has_entries) and is_video_entry(info)
+        def run_dl():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                dl_info = ydl.extract_info(url, download=True)
+                return ydl.prepare_filename(dl_info)
 
-        # ============================================
-        # الحالة 1: فيديو واحد (مو ألبوم)
-        # ============================================
-        if single_is_video:
-            await msg.edit_text("⏳ جاري سحب الفيديو بأعلى جودة ممكنة...")
-            ydl_opts = build_video_opts()
-
-            def run_dl():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    dl_info = ydl.extract_info(url, download=True)
-                    return ydl.prepare_filename(dl_info)
-
+        try:
+            # ============================================
+            # المحاولة الأولى: نتعامل معه كفيديو (يوتيوب، تيك توك، ريلز، الخ)
+            # ============================================
             file_path = await loop.run_in_executor(None, run_dl)
 
             if not os.path.exists(file_path):
@@ -231,25 +225,37 @@ async def download_media(client, message):
             await message.reply_video(video=file_path, supports_streaming=True)
             await msg.delete()
 
-        # ============================================
-        # الحالة 2: صورة واحدة أو ألبوم صور (كاروسيل)
-        # ============================================
-        else:
-            await msg.edit_text("🖼️ جاري تحميل الصور...")
-            image_urls = collect_image_urls(info)
+        except Exception as video_error:
+            error_msg = str(video_error)
 
-            if not image_urls:
-                await msg.edit_text("❌ لم يتم العثور على محتوى قابل للتحميل بهذا الرابط")
-                return
+            # ============================================
+            # لو فشل كفيديو وكان الرابط من انستغرام، نجرب كصورة/ألبوم
+            # ============================================
+            if is_instagram_url(url) and (
+                "No video formats" in error_msg or "Instagram" in error_msg
+            ):
+                await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
 
-            if len(image_urls) == 1:
-                await message.reply_photo(photo=image_urls[0])
+                image_urls = await loop.run_in_executor(
+                    None, fetch_instagram_images, url
+                )
+
+                if not image_urls:
+                    await msg.edit_text(
+                        "❌ لا يمكن تحميل هذا المحتوى (يحتاج تسجيل دخول/كوكيز أو الرابط خاص)\n"
+                        "حاول مع موقع آخر أو تأكد أن الرابط عام."
+                    )
+                    return
+
+                if len(image_urls) == 1:
+                    await message.reply_photo(photo=image_urls[0])
+                else:
+                    media_group = [InputMediaPhoto(u) for u in image_urls[:10]]
+                    await message.reply_media_group(media=media_group)
+
+                await msg.delete()
             else:
-                # تلغرام يدعم حتى 10 عناصر بالألبوم الواحد
-                media_group = [InputMediaPhoto(u) for u in image_urls[:10]]
-                await message.reply_media_group(media=media_group)
-
-            await msg.delete()
+                raise video_error
 
     except Exception as e:
         error_msg = str(e)
@@ -278,3 +284,4 @@ if __name__ == "__main__":
         logger.warning("⚠️ ملف cookies.txt غير موجود - تحميل انستغرام لن يعمل بشكل صحيح")
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
+
