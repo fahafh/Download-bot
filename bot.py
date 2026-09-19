@@ -278,4 +278,3 @@ if __name__ == "__main__":
         logger.warning("⚠️ ملف cookies.txt غير موجود - تحميل انستغرام لن يعمل بشكل صحيح")
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
-
