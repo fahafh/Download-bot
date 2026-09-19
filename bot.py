@@ -140,8 +140,11 @@ def get_requests_session():
         try:
             jar.load(ignore_discard=True, ignore_expires=True)
             session.cookies = jar
+            logger.info(f"تحميل الكوكيز: عدد الكوكيز المحملة = {len(list(jar))}")
         except Exception as e:
             logger.error(f"فشل تحميل الكوكيز: {e}")
+    else:
+        logger.warning("لا يوجد ملف كوكيز - سيتم الطلب بدون تسجيل دخول")
     return session
 
 
@@ -151,12 +154,30 @@ def fetch_instagram_images(url):
     عن طريق تحليل كود الصفحة مباشرة بدل الاعتماد على yt-dlp
     """
     session = get_requests_session()
-    resp = session.get(url, timeout=20)
+    resp = session.get(url, timeout=20, allow_redirects=True)
+
+    logger.info(f"IG_DEBUG: status_code={resp.status_code}")
+    logger.info(f"IG_DEBUG: final_url={resp.url}")
+    logger.info(f"IG_DEBUG: html_length={len(resp.text)}")
+
+    if "accounts/login" in resp.url or "login" in resp.url.lower():
+        logger.error("IG_DEBUG: تم تحويلنا لصفحة تسجيل الدخول - الكوكيز غير صالحة أو منتهية")
+
     resp.raise_for_status()
     html = resp.text
 
     # نبحث عن كل روابط الصور عالية الجودة المذكورة بكود الصفحة (display_url)
     raw_urls = re.findall(r'"display_url":"(https:[^"]+?)"', html)
+    logger.info(f"IG_DEBUG: عدد روابط display_url الموجودة = {len(raw_urls)}")
+
+    if not raw_urls:
+        # نجرب طريقة بديلة: og:image meta tag (يشتغل مع منشورات الصور العامة حتى بدون تسجيل دخول)
+        og_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+        if og_match:
+            logger.info("IG_DEBUG: تم العثور على صورة عبر og:image meta tag")
+            raw_urls = [og_match.group(1)]
+        else:
+            logger.error("IG_DEBUG: لم يتم العثور على أي صورة بأي طريقة")
 
     # تنظيف الروابط من الـ escape characters
     clean_urls = []
@@ -164,10 +185,12 @@ def fetch_instagram_images(url):
     for u in raw_urls:
         clean = u.encode().decode('unicode_escape')
         clean = clean.replace('\\/', '/')
+        clean = clean.replace('&amp;', '&')
         if clean not in seen:
             seen.add(clean)
             clean_urls.append(clean)
 
+    logger.info(f"IG_DEBUG: عدد الروابط النهائية بعد التنظيف = {len(clean_urls)}")
     return clean_urls
 
 
@@ -227,6 +250,7 @@ async def download_media(client, message):
 
         except Exception as video_error:
             error_msg = str(video_error)
+            logger.info(f"IG_DEBUG: فشل التحميل كفيديو، السبب: {error_msg[:150]}")
 
             # ============================================
             # لو فشل كفيديو وكان الرابط من انستغرام، نجرب كصورة/ألبوم
@@ -235,12 +259,14 @@ async def download_media(client, message):
                 "No video formats" in error_msg or "Instagram" in error_msg
             ):
                 await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
+                logger.info("IG_DEBUG: بدء محاولة استخراج الصور")
 
                 image_urls = await loop.run_in_executor(
                     None, fetch_instagram_images, url
                 )
 
                 if not image_urls:
+                    logger.error("IG_DEBUG: لم يتم العثور على أي صور - إنهاء العملية")
                     await msg.edit_text(
                         "❌ لا يمكن تحميل هذا المحتوى (يحتاج تسجيل دخول/كوكيز أو الرابط خاص)\n"
                         "حاول مع موقع آخر أو تأكد أن الرابط عام."
@@ -284,4 +310,3 @@ if __name__ == "__main__":
         logger.warning("⚠️ ملف cookies.txt غير موجود - تحميل انستغرام لن يعمل بشكل صحيح")
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
-
