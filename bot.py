@@ -115,7 +115,7 @@ async def download_media(client, message):
 
     ydl_opts = {
         'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(),
-        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+        'format': 'bestvideo+bestaudio/best',
         'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
         'merge_output_format': 'mp4',
         'concurrent_fragment_downloads': 5,
