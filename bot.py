@@ -2,9 +2,8 @@ import os
 import re
 import asyncio
 import logging
-import http.cookiejar
-import requests
 import imageio_ffmpeg
+import instaloader
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import UserNotParticipant
@@ -30,25 +29,56 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_USERNAME = "ht4h4"
 
 # ============================================
+# بيانات حساب انستغرام (لـ instaloader) - تُقرأ من Railway Variables
+# ============================================
+IG_USERNAME = os.environ.get("IG_USERNAME", "")
+IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
+
+# ============================================
 # مجلد التحميل - ينشئ تلقائياً لو مو موجود
 # ============================================
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ============================================
-# ملف الكوكيز (لانستغرام وغيره) - اختياري
+# ملف الكوكيز (لـ yt-dlp، اختياري - يفيد بالفيديوهات/الريلز الخاصة)
 # ============================================
 COOKIES_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIES_FILE)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
-
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# ============================================
+# إعداد instaloader (لتحميل صور/ألبومات انستغرام)
+# ============================================
+IG_LOADER = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False,
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False,
+    quiet=True,
+)
+IG_LOGGED_IN = False
+
+
+def instaloader_login():
+    """يسجل دخول انستغرام مرة وحدة عند بدء تشغيل البوت"""
+    global IG_LOGGED_IN
+    if not IG_USERNAME or not IG_PASSWORD:
+        logger.warning("⚠️ IG_USERNAME/IG_PASSWORD غير موجودين - دعم صور انستغرام معطل")
+        return
+    try:
+        IG_LOADER.login(IG_USERNAME, IG_PASSWORD)
+        IG_LOGGED_IN = True
+        logger.info("✅ instaloader: تسجيل الدخول لانستغرام نجح")
+    except Exception as e:
+        logger.error(f"❌ instaloader: فشل تسجيل الدخول لانستغرام: {e}")
+        IG_LOGGED_IN = False
 
 
 async def check_membership(client, user_id):
@@ -131,67 +161,50 @@ def build_video_opts():
     return opts
 
 
-def get_requests_session():
-    """يجهز جلسة requests فيها كوكيز انستغرام (لو موجودة) عشان نقدر نفتح منشورات خاصة"""
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
-    if HAS_COOKIES:
-        jar = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
-        try:
-            jar.load(ignore_discard=True, ignore_expires=True)
-            session.cookies = jar
-            logger.info(f"تحميل الكوكيز: عدد الكوكيز المحملة = {len(list(jar))}")
-        except Exception as e:
-            logger.error(f"فشل تحميل الكوكيز: {e}")
-    else:
-        logger.warning("لا يوجد ملف كوكيز - سيتم الطلب بدون تسجيل دخول")
-    return session
+def extract_shortcode(url):
+    """يستخرج الكود المختصر (shortcode) من رابط منشور انستغرام"""
+    match = re.search(r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([^/?#&]+)', url)
+    return match.group(1) if match else None
 
 
 def fetch_instagram_images(url):
     """
     يجيب روابط الصور من منشور انستغرام (صورة وحدة أو ألبوم كاروسيل)
-    عن طريق تحليل كود الصفحة مباشرة بدل الاعتماد على yt-dlp
+    باستخدام instaloader بدل yt-dlp
     """
-    session = get_requests_session()
-    resp = session.get(url, timeout=20, allow_redirects=True)
+    if not IG_LOGGED_IN:
+        logger.error("IG_DEBUG: لا يمكن استخدام instaloader - تسجيل الدخول غير مفعّل")
+        return []
 
-    logger.info(f"IG_DEBUG: status_code={resp.status_code}")
-    logger.info(f"IG_DEBUG: final_url={resp.url}")
-    logger.info(f"IG_DEBUG: html_length={len(resp.text)}")
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        logger.error("IG_DEBUG: لم يتم استخراج shortcode من الرابط")
+        return []
 
-    if "accounts/login" in resp.url or "login" in resp.url.lower():
-        logger.error("IG_DEBUG: تم تحويلنا لصفحة تسجيل الدخول - الكوكيز غير صالحة أو منتهية")
+    logger.info(f"IG_DEBUG: shortcode المستخرج = {shortcode}")
 
-    resp.raise_for_status()
-    html = resp.text
+    try:
+        post = instaloader.Post.from_shortcode(IG_LOADER.context, shortcode)
+    except Exception as e:
+        logger.error(f"IG_DEBUG: فشل جلب المنشور عبر instaloader: {e}")
+        return []
 
-    # نبحث عن كل روابط الصور عالية الجودة المذكورة بكود الصفحة (display_url)
-    raw_urls = re.findall(r'"display_url":"(https:[^"]+?)"', html)
-    logger.info(f"IG_DEBUG: عدد روابط display_url الموجودة = {len(raw_urls)}")
-
-    if not raw_urls:
-        # نجرب طريقة بديلة: og:image meta tag (يشتغل مع منشورات الصور العامة حتى بدون تسجيل دخول)
-        og_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-        if og_match:
-            logger.info("IG_DEBUG: تم العثور على صورة عبر og:image meta tag")
-            raw_urls = [og_match.group(1)]
+    urls = []
+    try:
+        if post.typename == "GraphSidecar":
+            # ألبوم كاروسيل (عدة صور/فيديوهات)
+            for node in post.get_sidecar_nodes():
+                if not node.is_video:
+                    urls.append(node.display_url)
         else:
-            logger.error("IG_DEBUG: لم يتم العثور على أي صورة بأي طريقة")
+            # منشور مفرد
+            if not post.is_video:
+                urls.append(post.url)
+    except Exception as e:
+        logger.error(f"IG_DEBUG: خطأ أثناء استخراج روابط الصور: {e}")
 
-    # تنظيف الروابط من الـ escape characters
-    clean_urls = []
-    seen = set()
-    for u in raw_urls:
-        clean = u.encode().decode('unicode_escape')
-        clean = clean.replace('\\/', '/')
-        clean = clean.replace('&amp;', '&')
-        if clean not in seen:
-            seen.add(clean)
-            clean_urls.append(clean)
-
-    logger.info(f"IG_DEBUG: عدد الروابط النهائية بعد التنظيف = {len(clean_urls)}")
-    return clean_urls
+    logger.info(f"IG_DEBUG: عدد الصور المستخرجة = {len(urls)}")
+    return urls
 
 
 def is_instagram_url(url):
@@ -253,20 +266,18 @@ async def download_media(client, message):
             logger.info(f"IG_DEBUG: فشل التحميل كفيديو، السبب: {error_msg[:150]}")
 
             # ============================================
-            # لو فشل كفيديو وكان الرابط من انستغرام، نجرب كصورة/ألبوم
+            # لو فشل كفيديو وكان الرابط من انستغرام، نجرب كصورة/ألبوم عبر instaloader
             # ============================================
             if is_instagram_url(url) and (
                 "No video formats" in error_msg or "Instagram" in error_msg
             ):
                 await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
-                logger.info("IG_DEBUG: بدء محاولة استخراج الصور")
 
                 image_urls = await loop.run_in_executor(
                     None, fetch_instagram_images, url
                 )
 
                 if not image_urls:
-                    logger.error("IG_DEBUG: لم يتم العثور على أي صور - إنهاء العملية")
                     await msg.edit_text(
                         "❌ لا يمكن تحميل هذا المحتوى (يحتاج تسجيل دخول/كوكيز أو الرابط خاص)\n"
                         "حاول مع موقع آخر أو تأكد أن الرابط عام."
@@ -307,6 +318,9 @@ async def download_media(client, message):
 
 if __name__ == "__main__":
     if not HAS_COOKIES:
-        logger.warning("⚠️ ملف cookies.txt غير موجود - تحميل انستغرام لن يعمل بشكل صحيح")
+        logger.warning("⚠️ ملف cookies.txt غير موجود - بعض فيديوهات انستغرام الخاصة قد لا تعمل")
+
+    instaloader_login()
+
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
