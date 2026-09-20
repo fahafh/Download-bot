@@ -151,6 +151,19 @@ def _find_media_list(node):
     return []
 
 
+def _collect_media_dicts(node, out):
+    """خطة بديلة: يجمع أي عنصر فيه url و type يبدأ بـ image أو video (حتى لو مو داخل قائمة)."""
+    if isinstance(node, dict):
+        t = node.get("type")
+        if node.get("url") and isinstance(t, str) and t.startswith(("image", "video")):
+            out.append(node)
+        for v in node.values():
+            _collect_media_dicts(v, out)
+    elif isinstance(node, list):
+        for i in node:
+            _collect_media_dicts(i, out)
+
+
 def fetch_instagram_images(url):
     """
     يجيب صور منشور انستغرام (صورة وحدة أو ألبوم) من RapidAPI،
@@ -190,7 +203,13 @@ def fetch_instagram_images(url):
         return []
 
     items = _find_media_list(data)
+    if not items:
+        # ممكن المنشور بصورة وحدة يرجع بشكل ثاني (مو قائمة)
+        items = []
+        _collect_media_dicts(data, items)
     logger.info(f"IG_API_DEBUG: عدد العناصر بالرد = {len(items)}")
+    if not items:
+        logger.info(f"IG_API_DEBUG: الرد الخام (أول 600 حرف) = {resp.text[:600]}")
 
     paths = []
     for item in items:
@@ -212,8 +231,48 @@ def fetch_instagram_images(url):
     return paths
 
 
+def fetch_tiktok_images(url):
+    """
+    يجيب صور منشورات التيك توك (Photo Mode) من خدمة tikwm المجانية،
+    وينزّلها بمجلد downloads، ويرجّع قائمة بمسارات الملفات.
+    """
+    try:
+        resp = requests.get(
+            "https://www.tikwm.com/api/",
+            params={"url": url},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=30,
+        )
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"TT_API_DEBUG: فشل الطلب: {e}")
+        return []
+
+    logger.info(f"TT_API_DEBUG: status={resp.status_code} code={data.get('code')} msg={data.get('msg')}")
+    image_urls = (data.get("data") or {}).get("images") or []
+    logger.info(f"TT_API_DEBUG: عدد الصور = {len(image_urls)}")
+
+    paths = []
+    for u in image_urls:
+        try:
+            r = requests.get(u, timeout=60)
+            r.raise_for_status()
+        except Exception as e:
+            logger.error(f"TT_API_DEBUG: فشل تنزيل صورة: {e}")
+            continue
+        path = os.path.join(DOWNLOAD_DIR, f"tt_{uuid.uuid4().hex}.jpg")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        paths.append(path)
+    return paths
+
+
 def is_instagram_url(url):
     return "instagram.com" in url.lower()
+
+
+def is_tiktok_url(url):
+    return "tiktok.com" in url.lower()
 
 
 @app.on_message(filters.text & ~filters.command(["start", "help"]))
@@ -274,19 +333,21 @@ async def download_media(client, message):
             # ============================================
             # المحاولة الثانية: صور انستغرام عبر RapidAPI
             # ============================================
-            if is_instagram_url(url) and (
+            ig_photo = is_instagram_url(url) and (
                 "No video formats" in error_msg or "Instagram" in error_msg
-            ):
+            )
+            tt_photo = is_tiktok_url(url)
+
+            if ig_photo or tt_photo:
                 await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
 
-                image_paths = await loop.run_in_executor(
-                    None, fetch_instagram_images, url
-                )
+                fetcher = fetch_instagram_images if ig_photo else fetch_tiktok_images
+                image_paths = await loop.run_in_executor(None, fetcher, url)
 
                 if not image_paths:
                     await msg.edit_text(
                         "❌ لا يمكن تحميل هذا المحتوى\n"
-                        "قد يكون الرابط خاصاً أو محذوفاً."
+                        "قد يكون الرابط خاصاً أو محذوفاً أو غير مدعوم."
                     )
                     return
 
