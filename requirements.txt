@@ -4,3 +4,4 @@ yt-dlp
 requests
 imageio-ffmpeg
 beautifulsoup4
+Pillow
