@@ -1,5 +1,6 @@
 import os
 import re
+import uuid
 import asyncio
 import logging
 import http.cookiejar
@@ -29,6 +30,10 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_USERNAME = "ht4h4"
 
+# مفتاح RapidAPI لتحميل صور انستغرام (متغير بيئة على Railway)
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
+RAPIDAPI_HOST = "instagram-post-reels-stories-downloader-api.p.rapidapi.com"
+
 # ============================================
 # مجلد التحميل - ينشئ تلقائياً لو مو موجود
 # ============================================
@@ -42,14 +47,6 @@ COOKIES_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIES_FILE)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-
-# معرّف تطبيق انستغرام الرسمي بالويب - مطلوب لنقطة الـ API العامة
-IG_APP_ID = "936619743392459"
-
-MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-)
 
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -134,114 +131,85 @@ def build_video_opts():
     return opts
 
 
-def extract_shortcode(url):
-    """يستخرج الكود المختصر (shortcode) من رابط منشور انستغرام"""
-    match = re.search(r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([^/?#&]+)', url)
-    return match.group(1) if match else None
-
-
-def get_ig_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": MOBILE_USER_AGENT,
-        "X-IG-App-ID": IG_APP_ID,
-        "Accept": "*/*",
-    })
-    if HAS_COOKIES:
-        jar = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
-        try:
-            jar.load(ignore_discard=True, ignore_expires=True)
-            session.cookies = jar
-        except Exception as e:
-            logger.error(f"IG_API_DEBUG: فشل تحميل الكوكيز: {e}")
-    return session
-
-
-def extract_image_url_from_node(node):
-    """يستخرج رابط الصورة من عنصر واحد (يتجاهل الفيديوهات)"""
-    if node.get("is_video") or node.get("video_versions"):
-        return None
-    candidates = node.get("image_versions2", {}).get("candidates")
-    if candidates:
-        return candidates[0]["url"]
-    return node.get("display_url")
-
-
-def parse_new_api_format(data):
-    """يحلل استجابة نقطة الـ API الحديثة (items)"""
-    items = data.get("items")
-    if not items:
-        return []
-    item = items[0]
-    urls = []
-    if item.get("carousel_media"):
-        for node in item["carousel_media"]:
-            u = extract_image_url_from_node(node)
-            if u:
-                urls.append(u)
-    else:
-        u = extract_image_url_from_node(item)
-        if u:
-            urls.append(u)
-    return urls
-
-
-def parse_graphql_format(data):
-    """يحلل استجابة الصيغة القديمة (graphql/shortcode_media) كخطة بديلة"""
-    gql = data.get("graphql", {}).get("shortcode_media")
-    if not gql:
-        return []
-    urls = []
-    if gql.get("edge_sidecar_to_children"):
-        for edge in gql["edge_sidecar_to_children"]["edges"]:
-            node = edge["node"]
-            if not node.get("is_video"):
-                du = node.get("display_url")
-                if du:
-                    urls.append(du)
-    else:
-        if not gql.get("is_video"):
-            du = gql.get("display_url")
-            if du:
-                urls.append(du)
-    return urls
+# ============================================
+# صور انستغرام عبر RapidAPI
+# ============================================
+def _find_media_list(node):
+    """يدوّر على أول قائمة عناصر كل عنصر فيها حقل url."""
+    if isinstance(node, list):
+        if node and all(isinstance(i, dict) and "url" in i for i in node):
+            return node
+        for i in node:
+            found = _find_media_list(i)
+            if found:
+                return found
+    elif isinstance(node, dict):
+        for v in node.values():
+            found = _find_media_list(v)
+            if found:
+                return found
+    return []
 
 
 def fetch_instagram_images(url):
     """
-    يجيب روابط الصور من منشور انستغرام (صورة وحدة أو ألبوم كاروسيل)
-    باستخدام نقطة الـ API العامة التابعة لموقع انستغرام نفسه
+    يجيب صور منشور انستغرام (صورة وحدة أو ألبوم) من RapidAPI،
+    وينزّلها بمجلد downloads، ويرجّع قائمة بمسارات الملفات.
     """
-    shortcode = extract_shortcode(url)
-    if not shortcode:
-        logger.error("IG_API_DEBUG: لم يتم استخراج shortcode من الرابط")
+    if not RAPIDAPI_KEY:
+        logger.error("IG_API_DEBUG: متغير RAPIDAPI_KEY غير موجود")
         return []
 
-    logger.info(f"IG_API_DEBUG: shortcode = {shortcode}")
-    session = get_ig_session()
-    api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+    # نشيل الباراميترات (img_index وغيرها) حتى يرجع المنشور كامل
+    clean_url = url.split("?")[0]
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+    }
 
     try:
-        resp = session.get(api_url, timeout=20)
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/instagram/",
+            params={"url": clean_url},
+            headers=headers,
+            timeout=45,
+        )
     except Exception as e:
-        logger.error(f"IG_API_DEBUG: فشل الاتصال: {e}")
+        logger.error(f"IG_API_DEBUG: فشل الاتصال بـ RapidAPI: {e}")
         return []
 
     logger.info(f"IG_API_DEBUG: status_code={resp.status_code}")
+    if resp.status_code != 200:
+        logger.error(f"IG_API_DEBUG: رد غير ناجح: {resp.text[:200]}")
+        return []
 
     try:
         data = resp.json()
     except Exception as e:
-        logger.error(f"IG_API_DEBUG: فشل تحليل JSON: {e} - بداية المحتوى: {resp.text[:150]}")
+        logger.error(f"IG_API_DEBUG: فشل تحليل JSON: {e} - {resp.text[:150]}")
         return []
 
-    urls = parse_new_api_format(data)
-    if not urls:
-        logger.info("IG_API_DEBUG: لم ينجح التنسيق الحديث، تجربة التنسيق القديم")
-        urls = parse_graphql_format(data)
+    items = _find_media_list(data)
+    logger.info(f"IG_API_DEBUG: عدد العناصر بالرد = {len(items)}")
 
-    logger.info(f"IG_API_DEBUG: عدد الصور المستخرجة = {len(urls)}")
-    return urls
+    paths = []
+    for item in items:
+        # نتجاوز الفيديوهات (yt-dlp يتعامل معها)
+        if str(item.get("type", "image")).startswith("video"):
+            continue
+        try:
+            r = requests.get(item["url"], timeout=60)
+            r.raise_for_status()
+        except Exception as e:
+            logger.error(f"IG_API_DEBUG: فشل تنزيل صورة: {e}")
+            continue
+        path = os.path.join(DOWNLOAD_DIR, f"ig_{uuid.uuid4().hex}.jpg")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        paths.append(path)
+
+    logger.info(f"IG_API_DEBUG: عدد الصور المنزّلة = {len(paths)}")
+    return paths
 
 
 def is_instagram_url(url):
@@ -265,6 +233,7 @@ async def download_media(client, message):
     msg = await message.reply_text("⏳ جاري سحب المحتوى بأعلى جودة ممكنة...")
 
     file_path = None
+    image_paths = []
     try:
         loop = asyncio.get_event_loop()
         ydl_opts = build_video_opts()
@@ -303,29 +272,33 @@ async def download_media(client, message):
             logger.info(f"فشل التحميل كفيديو، السبب: {error_msg[:150]}")
 
             # ============================================
-            # المحاولة الثانية: نقطة الـ API العامة لانستغرام (لمنشورات الصور)
+            # المحاولة الثانية: صور انستغرام عبر RapidAPI
             # ============================================
             if is_instagram_url(url) and (
                 "No video formats" in error_msg or "Instagram" in error_msg
             ):
                 await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
 
-                image_urls = await loop.run_in_executor(
+                image_paths = await loop.run_in_executor(
                     None, fetch_instagram_images, url
                 )
 
-                if not image_urls:
+                if not image_paths:
                     await msg.edit_text(
                         "❌ لا يمكن تحميل هذا المحتوى\n"
-                        "قد يكون الرابط خاصاً، محذوفاً، أو انستغرام غيّر طريقة عرض البيانات."
+                        "قد يكون الرابط خاصاً أو محذوفاً."
                     )
                     return
 
-                if len(image_urls) == 1:
-                    await message.reply_photo(photo=image_urls[0])
-                else:
-                    media_group = [InputMediaPhoto(u) for u in image_urls[:10]]
-                    await message.reply_media_group(media=media_group)
+                # تليجرام يسمح بـ 10 عناصر بالألبوم الواحد
+                for start in range(0, len(image_paths), 10):
+                    chunk = image_paths[start:start + 10]
+                    if len(chunk) == 1:
+                        await message.reply_photo(photo=chunk[0])
+                    else:
+                        await message.reply_media_group(
+                            media=[InputMediaPhoto(p) for p in chunk]
+                        )
 
                 await msg.delete()
             else:
@@ -351,10 +324,18 @@ async def download_media(client, message):
                 os.remove(file_path)
             except Exception as cleanup_err:
                 logger.error(f"فشل حذف الملف: {cleanup_err}")
+        for p in image_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception as cleanup_err:
+                logger.error(f"فشل حذف الصورة: {cleanup_err}")
 
 
 if __name__ == "__main__":
     if not HAS_COOKIES:
         logger.warning("⚠️ ملف cookies.txt غير موجود - بعض المحتوى الخاص قد لا يعمل")
+    if not RAPIDAPI_KEY:
+        logger.warning("⚠️ متغير RAPIDAPI_KEY غير موجود - صور انستغرام ما راح تشتغل")
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
