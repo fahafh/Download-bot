@@ -1,9 +1,9 @@
 import os
-import re
+import uuid
 import asyncio
 import logging
+import subprocess
 import imageio_ffmpeg
-import instaloader
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import UserNotParticipant
@@ -29,56 +29,23 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_USERNAME = "ht4h4"
 
 # ============================================
-# بيانات حساب انستغرام (لـ instaloader) - تُقرأ من Railway Variables
-# ============================================
-IG_USERNAME = os.environ.get("IG_USERNAME", "")
-IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
-
-# ============================================
 # مجلد التحميل - ينشئ تلقائياً لو مو موجود
 # ============================================
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ============================================
-# ملف الكوكيز (لـ yt-dlp، اختياري - يفيد بالفيديوهات/الريلز الخاصة)
+# ملف الكوكيز (لانستغرام، تيك توك وغيرها) - اختياري
 # ============================================
 COOKIES_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIES_FILE)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# ============================================
-# إعداد instaloader (لتحميل صور/ألبومات انستغرام)
-# ============================================
-IG_LOADER = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    compress_json=False,
-    quiet=True,
-)
-IG_LOGGED_IN = False
-
-
-def instaloader_login():
-    """يسجل دخول انستغرام مرة وحدة عند بدء تشغيل البوت"""
-    global IG_LOGGED_IN
-    if not IG_USERNAME or not IG_PASSWORD:
-        logger.warning("⚠️ IG_USERNAME/IG_PASSWORD غير موجودين - دعم صور انستغرام معطل")
-        return
-    try:
-        IG_LOADER.login(IG_USERNAME, IG_PASSWORD)
-        IG_LOGGED_IN = True
-        logger.info("✅ instaloader: تسجيل الدخول لانستغرام نجح")
-    except Exception as e:
-        logger.error(f"❌ instaloader: فشل تسجيل الدخول لانستغرام: {e}")
-        IG_LOGGED_IN = False
 
 
 async def check_membership(client, user_id):
@@ -161,54 +128,106 @@ def build_video_opts():
     return opts
 
 
-def extract_shortcode(url):
-    """يستخرج الكود المختصر (shortcode) من رابط منشور انستغرام"""
-    match = re.search(r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([^/?#&]+)', url)
-    return match.group(1) if match else None
-
-
-def fetch_instagram_images(url):
+def download_via_gallery_dl(url):
     """
-    يجيب روابط الصور من منشور انستغرام (صورة وحدة أو ألبوم كاروسيل)
-    باستخدام instaloader بدل yt-dlp
+    يستخدم gallery-dl كطريقة احتياطية لتحميل الصور/الألبومات
+    اللي ما يقدر yt-dlp يتعامل معها (منشورات صور بدون فيديو)
+    يرجع: (مسار المجلد المؤقت, قائمة مسارات الملفات المحملة)
     """
-    if not IG_LOGGED_IN:
-        logger.error("IG_DEBUG: لا يمكن استخدام instaloader - تسجيل الدخول غير مفعّل")
-        return []
+    temp_dir = os.path.join(DOWNLOAD_DIR, f"gdl_{uuid.uuid4().hex[:10]}")
+    os.makedirs(temp_dir, exist_ok=True)
 
-    shortcode = extract_shortcode(url)
-    if not shortcode:
-        logger.error("IG_DEBUG: لم يتم استخراج shortcode من الرابط")
-        return []
-
-    logger.info(f"IG_DEBUG: shortcode المستخرج = {shortcode}")
+    cmd = ["gallery-dl", "--dest", temp_dir, "-q", "--no-mtime"]
+    if HAS_COOKIES:
+        cmd += ["--cookies", COOKIES_FILE]
+    cmd.append(url)
 
     try:
-        post = instaloader.Post.from_shortcode(IG_LOADER.context, shortcode)
-    except Exception as e:
-        logger.error(f"IG_DEBUG: فشل جلب المنشور عبر instaloader: {e}")
-        return []
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        logger.info(f"GDL_DEBUG: returncode={result.returncode}")
+        if result.stderr:
+            logger.info(f"GDL_DEBUG: stderr={result.stderr[:300]}")
+    except subprocess.TimeoutExpired:
+        logger.error("GDL_DEBUG: انتهت المهلة أثناء تحميل gallery-dl")
+        return temp_dir, []
+    except FileNotFoundError:
+        logger.error("GDL_DEBUG: أمر gallery-dl غير موجود - تأكد من تثبيته بـ requirements.txt")
+        return temp_dir, []
 
-    urls = []
+    files = []
+    for root, _, filenames in os.walk(temp_dir):
+        for fn in filenames:
+            files.append(os.path.join(root, fn))
+
+    logger.info(f"GDL_DEBUG: عدد الملفات المحملة = {len(files)}")
+    return temp_dir, files
+
+
+def cleanup_dir(path):
+    """يحذف مجلد مؤقت وكل محتوياته بأمان"""
     try:
-        if post.typename == "GraphSidecar":
-            # ألبوم كاروسيل (عدة صور/فيديوهات)
-            for node in post.get_sidecar_nodes():
-                if not node.is_video:
-                    urls.append(node.display_url)
-        else:
-            # منشور مفرد
-            if not post.is_video:
-                urls.append(post.url)
+        for root, _, filenames in os.walk(path, topdown=False):
+            for fn in filenames:
+                os.remove(os.path.join(root, fn))
+            os.rmdir(root)
     except Exception as e:
-        logger.error(f"IG_DEBUG: خطأ أثناء استخراج روابط الصور: {e}")
-
-    logger.info(f"IG_DEBUG: عدد الصور المستخرجة = {len(urls)}")
-    return urls
+        logger.error(f"فشل حذف المجلد المؤقت: {e}")
 
 
-def is_instagram_url(url):
-    return "instagram.com" in url.lower()
+async def handle_gallery_dl_fallback(message, msg, url):
+    """يحاول تحميل المحتوى عبر gallery-dl ويرسله (صور/فيديو حسب النوع)"""
+    await msg.edit_text("🖼️ جاري تجربة طريقة بديلة للتحميل...")
+
+    loop = asyncio.get_event_loop()
+    temp_dir, files = await loop.run_in_executor(None, download_via_gallery_dl, url)
+
+    if not files:
+        cleanup_dir(temp_dir)
+        await msg.edit_text(
+            "❌ لا يمكن تحميل هذا المحتوى بأي طريقة متاحة\n"
+            "قد يكون الرابط خاصاً، محذوفاً، أو من نوع غير مدعوم."
+        )
+        return
+
+    images = [f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
+    videos = [f for f in files if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+
+    try:
+        if videos:
+            for v in videos:
+                size = os.path.getsize(v)
+                if size > MAX_FILE_SIZE:
+                    await message.reply_text("❌ أحد ملفات الفيديو كبير جداً (أكثر من 2GB)، تم تخطيه")
+                    continue
+                await message.reply_video(video=v, supports_streaming=True)
+
+        if images:
+            if len(images) == 1:
+                await message.reply_photo(photo=images[0])
+            else:
+                # تلغرام يدعم حتى 10 عناصر بالألبوم الواحد
+                for i in range(0, len(images), 10):
+                    chunk = images[i:i + 10]
+                    media_group = [InputMediaPhoto(open(p, "rb")) for p in chunk]
+                    await message.reply_media_group(media=media_group)
+
+        await msg.delete()
+
+    except Exception as e:
+        logger.error(f"خطأ أثناء رفع ملفات gallery-dl: {e}")
+        await msg.edit_text(f"❌ حدث خطأ أثناء الرفع:\n{str(e)[:200]}")
+
+    finally:
+        cleanup_dir(temp_dir)
+
+
+def is_photo_related_error(error_msg):
+    return "No video formats" in error_msg or "Instagram" in error_msg or "TikTok" in error_msg
 
 
 @app.on_message(filters.text & ~filters.command(["start", "help"]))
@@ -239,7 +258,7 @@ async def download_media(client, message):
 
         try:
             # ============================================
-            # المحاولة الأولى: نتعامل معه كفيديو (يوتيوب، تيك توك، ريلز، الخ)
+            # المحاولة الأولى: نتعامل معه كفيديو
             # ============================================
             file_path = await loop.run_in_executor(None, run_dl)
 
@@ -263,34 +282,13 @@ async def download_media(client, message):
 
         except Exception as video_error:
             error_msg = str(video_error)
-            logger.info(f"IG_DEBUG: فشل التحميل كفيديو، السبب: {error_msg[:150]}")
+            logger.info(f"فشل التحميل كفيديو، السبب: {error_msg[:150]}")
 
             # ============================================
-            # لو فشل كفيديو وكان الرابط من انستغرام، نجرب كصورة/ألبوم عبر instaloader
+            # المحاولة الثانية: gallery-dl (لمنشورات الصور/الألبومات)
             # ============================================
-            if is_instagram_url(url) and (
-                "No video formats" in error_msg or "Instagram" in error_msg
-            ):
-                await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
-
-                image_urls = await loop.run_in_executor(
-                    None, fetch_instagram_images, url
-                )
-
-                if not image_urls:
-                    await msg.edit_text(
-                        "❌ لا يمكن تحميل هذا المحتوى (يحتاج تسجيل دخول/كوكيز أو الرابط خاص)\n"
-                        "حاول مع موقع آخر أو تأكد أن الرابط عام."
-                    )
-                    return
-
-                if len(image_urls) == 1:
-                    await message.reply_photo(photo=image_urls[0])
-                else:
-                    media_group = [InputMediaPhoto(u) for u in image_urls[:10]]
-                    await message.reply_media_group(media=media_group)
-
-                await msg.delete()
+            if is_photo_related_error(error_msg):
+                await handle_gallery_dl_fallback(message, msg, url)
             else:
                 raise video_error
 
@@ -300,7 +298,7 @@ async def download_media(client, message):
 
         if "No video formats" in error_msg or "Instagram" in error_msg:
             await msg.edit_text(
-                "❌ لا يمكن تحميل هذا المحتوى (يحتاج تسجيل دخول/كوكيز أو الرابط خاص)\n"
+                "❌ لا يمكن تحميل هذا المحتوى\n"
                 "حاول مع موقع آخر أو تأكد أن الرابط عام."
             )
         elif "403" in error_msg or "404" in error_msg:
@@ -318,9 +316,6 @@ async def download_media(client, message):
 
 if __name__ == "__main__":
     if not HAS_COOKIES:
-        logger.warning("⚠️ ملف cookies.txt غير موجود - بعض فيديوهات انستغرام الخاصة قد لا تعمل")
-
-    instaloader_login()
-
+        logger.warning("⚠️ ملف cookies.txt غير موجود - بعض المحتوى الخاص قد لا يعمل")
     logger.info("🚀 البوت شغال الآن بنجاح...")
     app.run()
