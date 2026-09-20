@@ -1,8 +1,9 @@
 import os
-import uuid
+import re
 import asyncio
 import logging
-import subprocess
+import http.cookiejar
+import requests
 import imageio_ffmpeg
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
@@ -35,15 +36,20 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ============================================
-# ملف الكوكيز (لانستغرام، تيك توك وغيرها) - اختياري
+# ملف الكوكيز (لانستغرام وغيره) - اختياري
 # ============================================
 COOKIES_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIES_FILE)
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+# معرّف تطبيق انستغرام الرسمي بالويب - مطلوب لنقطة الـ API العامة
+IG_APP_ID = "936619743392459"
+
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+)
 
 app = Client("downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -128,106 +134,118 @@ def build_video_opts():
     return opts
 
 
-def download_via_gallery_dl(url):
-    """
-    يستخدم gallery-dl كطريقة احتياطية لتحميل الصور/الألبومات
-    اللي ما يقدر yt-dlp يتعامل معها (منشورات صور بدون فيديو)
-    يرجع: (مسار المجلد المؤقت, قائمة مسارات الملفات المحملة)
-    """
-    temp_dir = os.path.join(DOWNLOAD_DIR, f"gdl_{uuid.uuid4().hex[:10]}")
-    os.makedirs(temp_dir, exist_ok=True)
+def extract_shortcode(url):
+    """يستخرج الكود المختصر (shortcode) من رابط منشور انستغرام"""
+    match = re.search(r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([^/?#&]+)', url)
+    return match.group(1) if match else None
 
-    cmd = ["gallery-dl", "--dest", temp_dir, "-q", "--no-mtime"]
+
+def get_ig_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": MOBILE_USER_AGENT,
+        "X-IG-App-ID": IG_APP_ID,
+        "Accept": "*/*",
+    })
     if HAS_COOKIES:
-        cmd += ["--cookies", COOKIES_FILE]
-    cmd.append(url)
+        jar = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+        except Exception as e:
+            logger.error(f"IG_API_DEBUG: فشل تحميل الكوكيز: {e}")
+    return session
+
+
+def extract_image_url_from_node(node):
+    """يستخرج رابط الصورة من عنصر واحد (يتجاهل الفيديوهات)"""
+    if node.get("is_video") or node.get("video_versions"):
+        return None
+    candidates = node.get("image_versions2", {}).get("candidates")
+    if candidates:
+        return candidates[0]["url"]
+    return node.get("display_url")
+
+
+def parse_new_api_format(data):
+    """يحلل استجابة نقطة الـ API الحديثة (items)"""
+    items = data.get("items")
+    if not items:
+        return []
+    item = items[0]
+    urls = []
+    if item.get("carousel_media"):
+        for node in item["carousel_media"]:
+            u = extract_image_url_from_node(node)
+            if u:
+                urls.append(u)
+    else:
+        u = extract_image_url_from_node(item)
+        if u:
+            urls.append(u)
+    return urls
+
+
+def parse_graphql_format(data):
+    """يحلل استجابة الصيغة القديمة (graphql/shortcode_media) كخطة بديلة"""
+    gql = data.get("graphql", {}).get("shortcode_media")
+    if not gql:
+        return []
+    urls = []
+    if gql.get("edge_sidecar_to_children"):
+        for edge in gql["edge_sidecar_to_children"]["edges"]:
+            node = edge["node"]
+            if not node.get("is_video"):
+                du = node.get("display_url")
+                if du:
+                    urls.append(du)
+    else:
+        if not gql.get("is_video"):
+            du = gql.get("display_url")
+            if du:
+                urls.append(du)
+    return urls
+
+
+def fetch_instagram_images(url):
+    """
+    يجيب روابط الصور من منشور انستغرام (صورة وحدة أو ألبوم كاروسيل)
+    باستخدام نقطة الـ API العامة التابعة لموقع انستغرام نفسه
+    """
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        logger.error("IG_API_DEBUG: لم يتم استخراج shortcode من الرابط")
+        return []
+
+    logger.info(f"IG_API_DEBUG: shortcode = {shortcode}")
+    session = get_ig_session()
+    api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
-        logger.info(f"GDL_DEBUG: returncode={result.returncode}")
-        if result.stderr:
-            logger.info(f"GDL_DEBUG: stderr={result.stderr[:300]}")
-    except subprocess.TimeoutExpired:
-        logger.error("GDL_DEBUG: انتهت المهلة أثناء تحميل gallery-dl")
-        return temp_dir, []
-    except FileNotFoundError:
-        logger.error("GDL_DEBUG: أمر gallery-dl غير موجود - تأكد من تثبيته بـ requirements.txt")
-        return temp_dir, []
-
-    files = []
-    for root, _, filenames in os.walk(temp_dir):
-        for fn in filenames:
-            files.append(os.path.join(root, fn))
-
-    logger.info(f"GDL_DEBUG: عدد الملفات المحملة = {len(files)}")
-    return temp_dir, files
-
-
-def cleanup_dir(path):
-    """يحذف مجلد مؤقت وكل محتوياته بأمان"""
-    try:
-        for root, _, filenames in os.walk(path, topdown=False):
-            for fn in filenames:
-                os.remove(os.path.join(root, fn))
-            os.rmdir(root)
+        resp = session.get(api_url, timeout=20)
     except Exception as e:
-        logger.error(f"فشل حذف المجلد المؤقت: {e}")
+        logger.error(f"IG_API_DEBUG: فشل الاتصال: {e}")
+        return []
 
-
-async def handle_gallery_dl_fallback(message, msg, url):
-    """يحاول تحميل المحتوى عبر gallery-dl ويرسله (صور/فيديو حسب النوع)"""
-    await msg.edit_text("🖼️ جاري تجربة طريقة بديلة للتحميل...")
-
-    loop = asyncio.get_event_loop()
-    temp_dir, files = await loop.run_in_executor(None, download_via_gallery_dl, url)
-
-    if not files:
-        cleanup_dir(temp_dir)
-        await msg.edit_text(
-            "❌ لا يمكن تحميل هذا المحتوى بأي طريقة متاحة\n"
-            "قد يكون الرابط خاصاً، محذوفاً، أو من نوع غير مدعوم."
-        )
-        return
-
-    images = [f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
-    videos = [f for f in files if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+    logger.info(f"IG_API_DEBUG: status_code={resp.status_code}")
 
     try:
-        if videos:
-            for v in videos:
-                size = os.path.getsize(v)
-                if size > MAX_FILE_SIZE:
-                    await message.reply_text("❌ أحد ملفات الفيديو كبير جداً (أكثر من 2GB)، تم تخطيه")
-                    continue
-                await message.reply_video(video=v, supports_streaming=True)
-
-        if images:
-            if len(images) == 1:
-                await message.reply_photo(photo=images[0])
-            else:
-                # تلغرام يدعم حتى 10 عناصر بالألبوم الواحد
-                for i in range(0, len(images), 10):
-                    chunk = images[i:i + 10]
-                    media_group = [InputMediaPhoto(open(p, "rb")) for p in chunk]
-                    await message.reply_media_group(media=media_group)
-
-        await msg.delete()
-
+        data = resp.json()
     except Exception as e:
-        logger.error(f"خطأ أثناء رفع ملفات gallery-dl: {e}")
-        await msg.edit_text(f"❌ حدث خطأ أثناء الرفع:\n{str(e)[:200]}")
+        logger.error(f"IG_API_DEBUG: فشل تحليل JSON: {e} - بداية المحتوى: {resp.text[:150]}")
+        return []
 
-    finally:
-        cleanup_dir(temp_dir)
+    urls = parse_new_api_format(data)
+    if not urls:
+        logger.info("IG_API_DEBUG: لم ينجح التنسيق الحديث، تجربة التنسيق القديم")
+        urls = parse_graphql_format(data)
+
+    logger.info(f"IG_API_DEBUG: عدد الصور المستخرجة = {len(urls)}")
+    return urls
 
 
-def is_photo_related_error(error_msg):
-    return "No video formats" in error_msg or "Instagram" in error_msg or "TikTok" in error_msg
+def is_instagram_url(url):
+    return "instagram.com" in url.lower()
 
 
 @app.on_message(filters.text & ~filters.command(["start", "help"]))
@@ -285,10 +303,31 @@ async def download_media(client, message):
             logger.info(f"فشل التحميل كفيديو، السبب: {error_msg[:150]}")
 
             # ============================================
-            # المحاولة الثانية: gallery-dl (لمنشورات الصور/الألبومات)
+            # المحاولة الثانية: نقطة الـ API العامة لانستغرام (لمنشورات الصور)
             # ============================================
-            if is_photo_related_error(error_msg):
-                await handle_gallery_dl_fallback(message, msg, url)
+            if is_instagram_url(url) and (
+                "No video formats" in error_msg or "Instagram" in error_msg
+            ):
+                await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
+
+                image_urls = await loop.run_in_executor(
+                    None, fetch_instagram_images, url
+                )
+
+                if not image_urls:
+                    await msg.edit_text(
+                        "❌ لا يمكن تحميل هذا المحتوى\n"
+                        "قد يكون الرابط خاصاً، محذوفاً، أو انستغرام غيّر طريقة عرض البيانات."
+                    )
+                    return
+
+                if len(image_urls) == 1:
+                    await message.reply_photo(photo=image_urls[0])
+                else:
+                    media_group = [InputMediaPhoto(u) for u in image_urls[:10]]
+                    await message.reply_media_group(media=media_group)
+
+                await msg.delete()
             else:
                 raise video_error
 
