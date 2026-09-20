@@ -13,6 +13,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     InputMediaPhoto,
+    InputMediaVideo,
 )
 import yt_dlp
 
@@ -166,8 +167,8 @@ def _collect_media_dicts(node, out):
 
 def fetch_instagram_images(url):
     """
-    يجيب صور منشور انستغرام (صورة وحدة أو ألبوم) من RapidAPI،
-    وينزّلها بمجلد downloads، ويرجّع قائمة بمسارات الملفات.
+    يجيب وسائط منشور انستغرام (صور وفيديوهات وريلز وألبومات) من RapidAPI،
+    وينزّلها بمجلد downloads، ويرجّع قائمة من (مسار_الملف, هل_فيديو).
     """
     if not RAPIDAPI_KEY:
         logger.error("IG_API_DEBUG: متغير RAPIDAPI_KEY غير موجود")
@@ -211,24 +212,25 @@ def fetch_instagram_images(url):
     if not items:
         logger.info(f"IG_API_DEBUG: الرد الخام (أول 600 حرف) = {resp.text[:600]}")
 
-    paths = []
+    logger.info(f"IG_API_DEBUG: أنواع العناصر = {[str(i.get('type')) for i in items]}")
+
+    results = []  # (path, is_video)
     for item in items:
-        # نتجاوز الفيديوهات (yt-dlp يتعامل معها)
-        if str(item.get("type", "image")).startswith("video"):
-            continue
+        is_video = str(item.get("type", "image")).startswith("video")
         try:
-            r = requests.get(item["url"], timeout=60)
+            r = requests.get(item["url"], timeout=120 if is_video else 60)
             r.raise_for_status()
         except Exception as e:
-            logger.error(f"IG_API_DEBUG: فشل تنزيل صورة: {e}")
+            logger.error(f"IG_API_DEBUG: فشل تنزيل عنصر: {e}")
             continue
-        path = os.path.join(DOWNLOAD_DIR, f"ig_{uuid.uuid4().hex}.jpg")
+        ext = "mp4" if is_video else "jpg"
+        path = os.path.join(DOWNLOAD_DIR, f"ig_{uuid.uuid4().hex}.{ext}")
         with open(path, "wb") as f:
             f.write(r.content)
-        paths.append(path)
+        results.append((path, is_video))
 
-    logger.info(f"IG_API_DEBUG: عدد الصور المنزّلة = {len(paths)}")
-    return paths
+    logger.info(f"IG_API_DEBUG: عدد العناصر المنزّلة = {len(results)}")
+    return results
 
 
 def fetch_tiktok_images(url):
@@ -264,7 +266,7 @@ def fetch_tiktok_images(url):
         with open(path, "wb") as f:
             f.write(r.content)
         paths.append(path)
-    return paths
+    return [(p, False) for p in paths]
 
 
 def is_instagram_url(url):
@@ -292,7 +294,7 @@ async def download_media(client, message):
     msg = await message.reply_text("⏳ جاري سحب المحتوى بأعلى جودة ممكنة...")
 
     file_path = None
-    image_paths = []
+    media_items = []  # (path, is_video)
     try:
         loop = asyncio.get_event_loop()
         ydl_opts = build_video_opts()
@@ -339,12 +341,12 @@ async def download_media(client, message):
             tt_photo = is_tiktok_url(url)
 
             if ig_photo or tt_photo:
-                await msg.edit_text("🖼️ يبدو أنه منشور صور، جاري التحميل...")
+                await msg.edit_text("🖼️ جاري التحميل من المصدر البديل...")
 
                 fetcher = fetch_instagram_images if ig_photo else fetch_tiktok_images
-                image_paths = await loop.run_in_executor(None, fetcher, url)
+                media_items = await loop.run_in_executor(None, fetcher, url)
 
-                if not image_paths:
+                if not media_items:
                     await msg.edit_text(
                         "❌ لا يمكن تحميل هذا المحتوى\n"
                         "قد يكون الرابط خاصاً أو محذوفاً أو غير مدعوم."
@@ -352,13 +354,20 @@ async def download_media(client, message):
                     return
 
                 # تليجرام يسمح بـ 10 عناصر بالألبوم الواحد
-                for start in range(0, len(image_paths), 10):
-                    chunk = image_paths[start:start + 10]
+                for start in range(0, len(media_items), 10):
+                    chunk = media_items[start:start + 10]
                     if len(chunk) == 1:
-                        await message.reply_photo(photo=chunk[0])
+                        path, is_video = chunk[0]
+                        if is_video:
+                            await message.reply_video(video=path, supports_streaming=True)
+                        else:
+                            await message.reply_photo(photo=path)
                     else:
                         await message.reply_media_group(
-                            media=[InputMediaPhoto(p) for p in chunk]
+                            media=[
+                                InputMediaVideo(path) if is_video else InputMediaPhoto(path)
+                                for path, is_video in chunk
+                            ]
                         )
 
                 await msg.delete()
@@ -385,7 +394,7 @@ async def download_media(client, message):
                 os.remove(file_path)
             except Exception as cleanup_err:
                 logger.error(f"فشل حذف الملف: {cleanup_err}")
-        for p in image_paths:
+        for p, _ in media_items:
             try:
                 if os.path.exists(p):
                     os.remove(p)
