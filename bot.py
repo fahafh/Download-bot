@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import glob
 import shutil
 import asyncio
@@ -26,33 +27,27 @@ API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = (
+RAPIDAPI_HOST = os.getenv(
+    "RAPIDAPI_HOST",
     "instagram-post-reels-stories-downloader-api.p.rapidapi.com"
 )
 
-DOWNLOAD_DIR = "downloads"
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 MAX_MEDIA_PER_LINK = 10
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+REQUEST_TIMEOUT = 30
 
-
-# =========================================================
-# TELEGRAM
-# =========================================================
-
-app = Client(
-    "telegram_downloader_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
+USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Mobile Safari/537.36"
 )
 
 
 # =========================================================
-# LOG
+# LOGGING
 # =========================================================
 
 def log(message):
@@ -60,464 +55,304 @@ def log(message):
 
 
 # =========================================================
-# HTTP
+# CLIENT
 # =========================================================
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 13) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/140.0 Mobile Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-    "Accept": "*/*",
-}
-
-
-# =========================================================
-# URL HELPERS
-# =========================================================
-
-URL_REGEX = re.compile(
-    r"https?://[^\s<>]+",
-    re.IGNORECASE,
+app = Client(
+    "telegram_downloader_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
 )
 
 
+# =========================================================
+# COMMON HELPERS
+# =========================================================
+
 def clean_url(url):
-    if not url:
-        return ""
-
     url = url.strip()
-
-    url = url.strip(
-        "<>[](){}\"'"
-    )
-
-    url = url.rstrip(
-        ".,!?;:)]}>\"'"
-    )
-
+    url = url.rstrip(".,!?)]}>\"'")
     return url
 
 
-def extract_url(text):
-    if not text:
-        return None
+def detect_platform(url):
+    host = urlparse(url).netloc.lower()
 
-    matches = URL_REGEX.findall(text)
+    if "instagram.com" in host:
+        return "instagram"
 
-    if not matches:
-        return None
+    if "tiktok.com" in host or "vm.tiktok.com" in host:
+        return "tiktok"
 
-    return clean_url(matches[0])
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
+
+    if "twitter.com" in host or "x.com" in host:
+        return "twitter"
+
+    return "unknown"
 
 
-def get_domain(url):
+def is_valid_url(url):
     try:
-        return urlparse(url).netloc.lower()
+        p = urlparse(url)
+        return p.scheme in ("http", "https") and bool(p.netloc)
     except Exception:
-        return ""
-
-
-def is_instagram(url):
-    d = get_domain(url)
-
-    return (
-        "instagram.com" in d
-        or "instagr.am" in d
-    )
-
-
-def is_tiktok(url):
-    d = get_domain(url)
-
-    return (
-        "tiktok.com" in d
-        or "vm.tiktok.com" in d
-    )
-
-
-def is_facebook(url):
-    d = get_domain(url)
-
-    return (
-        "facebook.com" in d
-        or "fb.watch" in d
-        or "fb.com" in d
-    )
-
-
-def is_x(url):
-    d = get_domain(url)
-
-    return (
-        "x.com" in d
-        or "twitter.com" in d
-        or "mobile.twitter.com" in d
-    )
-
-
-# =========================================================
-# FILE HELPERS
-# =========================================================
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".gif",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".avif",
-    ".heic",
-    ".heif",
-}
-
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".mkv",
-    ".webm",
-    ".mov",
-    ".avi",
-    ".m4v",
-    ".ts",
-    ".flv",
-}
-
-
-def is_image(path):
-    return os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS
-
-
-def is_video(path):
-    return os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+        return False
 
 
 def safe_filename(name):
-    name = re.sub(
-        r'[\\/*?:"<>|]+',
-        "_",
-        name,
-    )
-
-    name = name.strip()
-
-    return name[:150] or "media"
+    name = unquote(str(name))
+    name = re.sub(r"[^\w\-. ]+", "_", name)
+    name = re.sub(r"\s+", "_", name)
+    return name[:180] or "media"
 
 
-def create_job():
-    return tempfile.mkdtemp(
-        prefix="job_",
-        dir=DOWNLOAD_DIR,
-    )
+def file_size(path):
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return 0
 
 
-def cleanup(path):
-    if not path:
-        return
+def is_too_large(path):
+    return file_size(path) > MAX_FILE_SIZE
 
+
+def remove_file(path):
     try:
         if os.path.exists(path):
-            shutil.rmtree(
-                path,
-                ignore_errors=True,
-            )
+            os.remove(path)
+            log(f"Deleted: {path}")
     except Exception as e:
-        log(f"CLEANUP ERROR: {e}")
+        log(f"Delete failed: {path} -> {e}")
 
 
-# =========================================================
-# IMAGE VALIDATION
-# =========================================================
+def unique_path(folder, base_name, ext):
+    base_name = safe_filename(base_name)
+    ext = ext.lower()
 
-def validate_image(path):
-    try:
+    path = os.path.join(folder, base_name + ext)
 
-        if not os.path.exists(path):
-            return False
+    counter = 1
 
-        size = os.path.getsize(path)
-
-        if size < 1000:
-            return False
-
-        if size > MAX_FILE_SIZE:
-            return False
-
-        with Image.open(path) as img:
-
-            width, height = img.size
-
-            # Reject tiny icons/avatars/favicons
-            if width < 150 or height < 150:
-                log(
-                    f"IMAGE REJECTED: "
-                    f"too small {width}x{height}"
-                )
-                return False
-
-            img.verify()
-
-        return True
-
-    except Exception as e:
-
-        log(
-            f"IMAGE REJECTED: {e}"
+    while os.path.exists(path):
+        path = os.path.join(
+            folder,
+            f"{base_name}_{counter}{ext}"
         )
+        counter += 1
 
+    return path
+
+
+# =========================================================
+# IMAGE HELPERS
+# =========================================================
+
+BAD_WORDS = [
+    "favicon",
+    "sprite",
+    "avatar",
+    "profile_pic",
+    "profilepic",
+    "default_avatar",
+    "placeholder",
+    "instagram-logo",
+    "instagram_logo",
+    "instagramlogo",
+    "logo-instagram",
+    "logo_instagram",
+    "logo",
+    "icon",
+    "emoji",
+    "app-icon",
+    "app_icon",
+    "apple-touch-icon",
+]
+
+
+def is_bad_asset(url):
+    low = unquote(url).lower()
+
+    for word in BAD_WORDS:
+        if word in low:
+            return True
+
+    return False
+
+
+def is_image_file(path):
+    try:
+        with Image.open(path) as img:
+            return img.format is not None
+    except Exception:
         return False
 
 
-# =========================================================
-# IMAGE -> JPG
-# =========================================================
-
-def convert_to_jpg(path):
-
-    if not os.path.exists(path):
-        return None
-
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext in (".jpg", ".jpeg"):
-
-        if validate_image(path):
-            return path
-
-        return None
-
-    output = (
-        os.path.splitext(path)[0]
-        + "_telegram.jpg"
-    )
+def convert_to_jpg(src, folder):
+    """
+    Convert any image to a normal JPG.
+    This avoids Telegram PHOTO_EXT_INVALID.
+    """
 
     try:
+        with Image.open(src) as original:
 
-        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(original)
 
-            img = ImageOps.exif_transpose(img)
-
+            # If animated, take first frame
             try:
-                img.seek(0)
-            except Exception:
-                pass
-
-            if img.mode in (
-                "RGBA",
-                "LA",
-                "P",
-            ):
-
-                if img.mode == "P":
+                if getattr(img, "is_animated", False):
+                    img.seek(0)
                     img = img.convert("RGBA")
-
-                background = Image.new(
-                    "RGB",
-                    img.size,
-                    "white",
-                )
-
-                if img.mode in (
-                    "RGBA",
-                    "LA",
-                ):
-
-                    background.paste(
-                        img,
-                        mask=img.getchannel("A"),
-                    )
-
                 else:
+                    img = img.convert("RGBA")
+            except Exception:
+                img = img.convert("RGBA")
 
-                    background.paste(img)
-
-                img = background
-
-            else:
-
-                img = img.convert("RGB")
-
+            # Limit gigantic images
             max_dimension = 10000
 
-            if max(img.size) > max_dimension:
-
-                ratio = (
-                    max_dimension
-                    / max(img.size)
-                )
+            if max(img.width, img.height) > max_dimension:
+                ratio = max_dimension / max(img.width, img.height)
 
                 new_size = (
                     int(img.width * ratio),
-                    int(img.height * ratio),
+                    int(img.height * ratio)
                 )
 
-                img = img.resize(
-                    new_size,
-                    Image.Resampling.LANCZOS,
-                )
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
 
-            img.save(
-                output,
-                "JPEG",
-                quality=95,
-                optimize=True,
+            # White background for transparent images
+            background = Image.new(
+                "RGB",
+                img.size,
+                "white"
             )
 
-        if validate_image(output):
-            return output
+            background.paste(
+                img,
+                mask=img.getchannel("A")
+            )
+
+            base = os.path.splitext(
+                os.path.basename(src)
+            )[0]
+
+            out = unique_path(
+                folder,
+                base,
+                ".jpg"
+            )
+
+            background.save(
+                out,
+                "JPEG",
+                quality=95,
+                optimize=True
+            )
+
+            return out
 
     except Exception as e:
-
-        log(
-            f"IMAGE CONVERSION ERROR: {e}"
-        )
-
-    return None
+        log(f"JPG conversion failed: {src} -> {e}")
+        return None
 
 
 # =========================================================
-# BAD ASSETS
+# HTTP DOWNLOAD
 # =========================================================
 
-def is_bad_asset(url):
+def download_direct(url, folder, index=0, expected_type=None):
+    """
+    Download a direct media URL.
+    """
 
-    low = url.lower()
-
-    bad_words = (
-        "favicon",
-        "sprite",
-        "profile_pic",
-        "profilepic",
-        "avatar",
-        "default_avatar",
-        "placeholder",
-        "logo",
-        "icon",
-    )
-
-    return any(
-        word in low
-        for word in bad_words
-    )
-
-
-def is_media_url(url):
-
-    if not url:
-        return False
-
-    if not (
-        url.startswith("http://")
-        or url.startswith("https://")
-    ):
-        return False
-
-    if is_bad_asset(url):
-        return False
-
-    return True
-
-
-# =========================================================
-# DIRECT DOWNLOAD
-# =========================================================
-
-def download_direct(
-    url,
-    job_dir,
-    referer="",
-):
     try:
 
-        if not is_media_url(url):
+        if not is_valid_url(url):
             return None
 
-        headers = dict(HEADERS)
+        if is_bad_asset(url):
+            log(f"Rejected bad asset: {url[:160]}")
+            return None
 
-        if referer:
-            headers["Referer"] = referer
-
-        log(
-            f"DIRECT: {url[:220]}"
-        )
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+            "Referer": "https://www.instagram.com/"
+        }
 
         response = requests.get(
             url,
             headers=headers,
-            timeout=45,
             stream=True,
-            allow_redirects=True,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
         )
 
-        log(
-            f"DIRECT RESPONSE: "
-            f"{response.status_code} "
-            f"{response.headers.get('Content-Type')}"
-        )
-
-        response.raise_for_status()
-
-        content_type = (
-            response.headers
-            .get("Content-Type", "")
-            .lower()
-            .split(";")[0]
-        )
-
-        if content_type.startswith(
-            "text/html"
-        ):
+        if response.status_code != 200:
+            log(
+                f"Download HTTP {response.status_code}: "
+                f"{url[:160]}"
+            )
             return None
 
-        extension = (
-            mimetypes.guess_extension(
-                content_type
-            )
+        content_type = (
+            response.headers.get("Content-Type", "")
+            .lower()
         )
 
-        if not extension:
+        if "text/html" in content_type:
+            log("Rejected HTML instead of media")
+            return None
 
-            parsed = urlparse(
-                response.url
+        final_url = response.url
+
+        parsed = urlparse(final_url)
+
+        ext = os.path.splitext(
+            parsed.path
+        )[1].lower()
+
+        if not ext:
+            guessed = mimetypes.guess_extension(
+                content_type.split(";")[0]
             )
 
-            original = unquote(
-                os.path.basename(
-                    parsed.path
-                )
-            )
+            if guessed:
+                ext = guessed
 
-            extension = os.path.splitext(
-                original
-            )[1]
+        if ext in (".jpe",):
+            ext = ".jpg"
 
-        if not extension:
-            extension = ".bin"
+        if not ext:
+            ext = ".bin"
 
-        if extension == ".jpe":
-            extension = ".jpg"
+        if expected_type == "video":
+            if ext not in (
+                ".mp4",
+                ".mov",
+                ".m4v",
+                ".webm",
+                ".mkv"
+            ):
+                ext = ".mp4"
 
-        filename = safe_filename(
-            f"media_{abs(hash(url))}"
-        )
-
-        path = os.path.join(
-            job_dir,
-            filename + extension,
+        filename = unique_path(
+            folder,
+            f"media_{index + 1}",
+            ext
         )
 
         total = 0
 
-        with open(path, "wb") as file:
+        with open(filename, "wb") as f:
 
             for chunk in response.iter_content(
-                chunk_size=1024 * 1024
+                chunk_size=1024 * 256
             ):
 
                 if not chunk:
@@ -526,772 +361,696 @@ def download_direct(
                 total += len(chunk)
 
                 if total > MAX_FILE_SIZE:
-
-                    log(
-                        "DIRECT: file too large"
-                    )
-
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-
+                    f.close()
+                    remove_file(filename)
+                    log("File exceeded maximum size")
                     return None
 
-                file.write(chunk)
+                f.write(chunk)
 
-        if not os.path.exists(path):
+        if file_size(filename) < 1000:
+            remove_file(filename)
             return None
 
-        if os.path.getsize(path) == 0:
-            os.remove(path)
-            return None
+        # Validate image
+        if content_type.startswith("image/") or ext in (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".gif",
+            ".bmp"
+        ):
 
-        if is_image(path):
-
-            if not validate_image(path):
-
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
+            if not is_image_file(filename):
+                remove_file(filename)
                 return None
 
-        return path
+        log(f"Downloaded: {filename}")
+
+        return filename
 
     except Exception as e:
-
-        log(
-            f"DIRECT ERROR: {e}"
-        )
-
+        log(f"Direct download error: {e}")
         return None
 
 
 # =========================================================
-# META EXTRACTION
+# URL EXTRACTION
 # =========================================================
 
-def extract_meta_urls(
-    html,
-    page_url,
-):
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
+MEDIA_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".webm"
+)
+
+
+def looks_like_media_url(url):
+    if not is_valid_url(url):
+        return False
+
+    low = unquote(url).lower()
+
+    if is_bad_asset(low):
+        return False
+
+    # Strong Instagram CDN indicators
+    strong = (
+        "scontent." in low,
+        "cdninstagram.com" in low,
+        "fbcdn.net" in low,
+        "lookaside.fbsbx.com" in low,
+        "video.twimg.com" in low,
+        "pbs.twimg.com" in low,
     )
 
-    images = []
-    videos = []
+    if any(strong):
+        return True
 
-    image_keys = {
-        "og:image",
-        "og:image:url",
-        "og:image:secure_url",
-        "twitter:image",
-        "twitter:image:src",
-    }
+    path = urlparse(url).path.lower()
 
-    video_keys = {
-        "og:video",
-        "og:video:url",
-        "og:video:secure_url",
-        "twitter:player:stream",
-    }
+    if path.endswith(MEDIA_EXTENSIONS):
+        return True
 
-    for meta in soup.find_all("meta"):
+    return False
 
-        key = (
-            meta.get("property")
-            or meta.get("name")
-            or ""
-        ).lower()
 
-        value = (
-            meta.get("content")
-            or ""
-        ).strip()
+def normalize_extracted_url(url, base_url=None):
 
-        if not value:
-            continue
+    if not url:
+        return None
 
-        value = urljoin(
-            page_url,
-            value,
-        )
+    url = unquote(str(url)).strip()
 
-        if key in image_keys:
+    url = url.replace("\\/", "/")
 
-            if (
-                is_media_url(value)
-                and value not in images
-            ):
-                images.append(value)
+    if base_url:
+        url = urljoin(base_url, url)
 
-        elif key in video_keys:
+    # Remove JSON escaping
+    url = url.replace("\\u0026", "&")
+    url = url.replace("\\u003D", "=")
 
-            if (
-                is_media_url(value)
-                and value not in videos
-            ):
-                videos.append(value)
+    return url
 
-    return images, videos
 
+def extract_urls_from_text(text):
+    """
+    Extract only URL-looking strings from scripts/HTML.
+    """
 
-# =========================================================
-# SOCIAL CDN EXTRACTION
-# =========================================================
-
-def extract_cdn_urls(
-    html,
-    page_url,
-):
-    images = []
-    videos = []
-
-    # Facebook image/CDN URLs
-    image_patterns = [
-
-        r'https?:\\?/\\?/scontent[^"\'<>\s]+',
-
-        r'https?:\\?/\\?/lookaside\.fbsbx\.com[^"\'<>\s]+',
-
-        r'https?:\\?/\\?/external[^"\'<>\s]+',
-
-        r'https?:\\?/\\?/pbs\.twimg\.com[^"\'<>\s]+',
-
-    ]
-
-    video_patterns = [
-
-        r'https?:\\?/\\?/video[^"\'<>\s]+',
-
-        r'https?:\\?/\\?/video\.twimg\.com[^"\'<>\s]+',
-
-    ]
-
-    for pattern in image_patterns:
-
-        try:
-
-            matches = re.findall(
-                pattern,
-                html,
-                re.IGNORECASE,
-            )
-
-            for value in matches:
-
-                value = value.replace(
-                    "\\/",
-                    "/",
-                )
-
-                value = value.replace(
-                    "\\u0026",
-                    "&",
-                )
-
-                value = urljoin(
-                    page_url,
-                    value,
-                )
-
-                if (
-                    is_media_url(value)
-                    and value not in images
-                ):
-                    images.append(value)
-
-        except Exception:
-            pass
-
-    for pattern in video_patterns:
-
-        try:
-
-            matches = re.findall(
-                pattern,
-                html,
-                re.IGNORECASE,
-            )
-
-            for value in matches:
-
-                value = value.replace(
-                    "\\/",
-                    "/",
-                )
-
-                value = value.replace(
-                    "\\u0026",
-                    "&",
-                )
-
-                value = urljoin(
-                    page_url,
-                    value,
-                )
-
-                if (
-                    is_media_url(value)
-                    and value not in videos
-                ):
-                    videos.append(value)
-
-        except Exception:
-            pass
-
-    return images, videos
-
-
-# =========================================================
-# FACEBOOK / X HTML
-# =========================================================
-
-def social_html_download(
-    url,
-    job_dir,
-):
-    try:
-
-        headers = dict(HEADERS)
-        headers["Referer"] = url
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=35,
-            allow_redirects=True,
-        )
-
-        log(
-            f"SOCIAL HTML: "
-            f"{response.status_code} "
-            f"length={len(response.text)}"
-        )
-
-        if response.status_code != 200:
-            return []
-
-        html = response.text
-
-        meta_images, meta_videos = (
-            extract_meta_urls(
-                html,
-                response.url,
-            )
-        )
-
-        cdn_images, cdn_videos = (
-            extract_cdn_urls(
-                html,
-                response.url,
-            )
-        )
-
-        image_urls = []
-        video_urls = []
-
-        for value in (
-            meta_images + cdn_images
-        ):
-
-            if value not in image_urls:
-                image_urls.append(value)
-
-        for value in (
-            meta_videos + cdn_videos
-        ):
-
-            if value not in video_urls:
-                video_urls.append(value)
-
-        log(
-            f"SOCIAL HTML: "
-            f"{len(image_urls)} images, "
-            f"{len(video_urls)} videos"
-        )
-
-        results = []
-
-        for media_url in image_urls[:10]:
-
-            path = download_direct(
-                media_url,
-                job_dir,
-                response.url,
-            )
-
-            if path and is_image(path):
-
-                results.append(
-                    (path, False)
-                )
-
-        for media_url in video_urls[:5]:
-
-            path = download_direct(
-                media_url,
-                job_dir,
-                response.url,
-            )
-
-            if path and is_video(path):
-
-                results.append(
-                    (path, True)
-                )
-
-        return results
-
-    except Exception as e:
-
-        log(
-            f"SOCIAL HTML ERROR: {e}"
-        )
-
+    if not text:
         return []
+
+    found = []
+
+    patterns = [
+        r'https?://[^"\'<>\s\\]+',
+        r'https?:\\/\\/[^"\'<>\s\\]+',
+    ]
+
+    for pattern in patterns:
+
+        try:
+            matches = re.findall(pattern, text)
+
+            for value in matches:
+
+                value = normalize_extracted_url(value)
+
+                if not value:
+                    continue
+
+                if looks_like_media_url(value):
+                    found.append(value)
+
+        except Exception:
+            pass
+
+    return found
 
 
 # =========================================================
 # INSTAGRAM RAPIDAPI
 # =========================================================
 
-def collect_instagram_media(
-    obj,
-    output=None,
-    score=0,
-):
-    if output is None:
-        output = []
+def extract_urls_recursive(obj, results=None, key_hint=""):
+    """
+    Recursively scan JSON for media URLs.
+    """
+
+    if results is None:
+        results = []
 
     if isinstance(obj, dict):
 
         for key, value in obj.items():
 
-            key_name = str(
-                key
-            ).lower()
-
-            current_score = score
-
-            if any(
-                item in key_name
-                for item in (
-                    "display_url",
-                    "displayurl",
-                    "image_url",
-                    "imageurl",
-                    "media_url",
-                    "mediaurl",
-                    "video_url",
-                    "videourl",
-                    "download_url",
-                    "downloadurl",
-                    "photo_url",
-                    "photourl",
-                )
-            ):
-                current_score = max(
-                    current_score,
-                    10,
-                )
-
-            elif any(
-                item in key_name
-                for item in (
-                    "image",
-                    "photo",
-                    "video",
-                    "thumbnail",
-                )
-            ):
-                current_score = max(
-                    current_score,
-                    5,
-                )
+            key_low = str(key).lower()
 
             if isinstance(value, str):
 
-                value = value.strip()
-
                 if (
-                    value.startswith(
-                        "https://"
-                    )
-                    or value.startswith(
-                        "http://"
-                    )
+                    value.startswith("http://")
+                    or value.startswith("https://")
                 ):
 
-                    if (
-                        current_score >= 5
-                        and is_media_url(value)
-                    ):
+                    url = normalize_extracted_url(value)
 
-                        output.append(
+                    if not url:
+                        continue
+
+                    # Strong keys
+                    strong_key = any(
+                        x in key_low
+                        for x in (
+                            "display_url",
+                            "image_url",
+                            "media_url",
+                            "video_url",
+                            "download_url",
+                            "source_url",
+                            "original_url",
+                            "photo_url",
+                            "play_url",
+                            "hdplay",
+                        )
+                    )
+
+                    if strong_key or looks_like_media_url(url):
+                        results.append(
                             (
-                                current_score,
-                                value,
+                                100 if strong_key else 60,
+                                url,
+                                key_low
                             )
                         )
 
-            else:
-
-                collect_instagram_media(
+            elif isinstance(value, (dict, list)):
+                extract_urls_recursive(
                     value,
-                    output,
-                    current_score,
+                    results,
+                    key_low
                 )
 
     elif isinstance(obj, list):
 
         for item in obj:
-
-            collect_instagram_media(
+            extract_urls_recursive(
                 item,
-                output,
-                score,
+                results,
+                key_hint
             )
 
-    return output
+    return results
 
 
-def instagram_rapidapi(
-    url,
-    job_dir,
-):
+def rapidapi_instagram(url, folder):
+
     if not RAPIDAPI_KEY:
-
-        log(
-            "INSTAGRAM: RAPIDAPI_KEY missing"
-        )
-
+        log("RapidAPI key not configured")
         return []
+
+    endpoint = (
+        f"https://{RAPIDAPI_HOST}/instagram/"
+    )
+
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json"
+    }
+
+    params = {
+        "url": url
+    }
 
     try:
 
-        endpoint = (
-            f"https://{RAPIDAPI_HOST}/instagram/"
-        )
-
-        headers = {
-            "x-rapidapi-key": RAPIDAPI_KEY,
-            "x-rapidapi-host": RAPIDAPI_HOST,
-        }
+        log("Instagram RapidAPI request...")
 
         response = requests.get(
             endpoint,
             headers=headers,
-            params={"url": url},
-            timeout=45,
+            params=params,
+            timeout=REQUEST_TIMEOUT
         )
 
+        body = response.text
+
         log(
-            f"INSTAGRAM RAPIDAPI: "
+            f"Instagram RapidAPI: "
             f"{response.status_code} "
-            f"length={len(response.text)}"
+            f"length={len(body)}"
         )
+
+        # Do not print API key or complete response
+        if len(body) <= 500:
+            safe_body = body.replace(
+                RAPIDAPI_KEY,
+                "***"
+            )
+
+            log(
+                f"RapidAPI response: "
+                f"{safe_body[:500]}"
+            )
 
         if response.status_code != 200:
             return []
 
         try:
-
             data = response.json()
-
-        except Exception:
-
+        except Exception as e:
+            log(f"RapidAPI JSON error: {e}")
             return []
 
-        candidates = (
-            collect_instagram_media(data)
-        )
-
-        candidates.sort(
-            key=lambda item: item[0],
-            reverse=True,
-        )
+        candidates = extract_urls_recursive(data)
 
         log(
-            f"INSTAGRAM: "
-            f"{len(candidates)} candidates"
+            f"Instagram RapidAPI candidates: "
+            f"{len(candidates)}"
         )
 
-        results = []
+        # Remove duplicates
+        unique = []
         seen = set()
 
-        for score, media_url in candidates:
+        for score, media_url, key in sorted(
+            candidates,
+            key=lambda x: x[0],
+            reverse=True
+        ):
+
+            media_url = normalize_extracted_url(media_url)
+
+            if not media_url:
+                continue
 
             if media_url in seen:
                 continue
 
             seen.add(media_url)
 
-            log(
-                f"IG candidate "
-                f"score={score}: "
-                f"{media_url[:180]}"
+            unique.append(
+                (score, media_url, key)
+            )
+
+            if len(unique) >= MAX_MEDIA_PER_LINK:
+                break
+
+        files = []
+
+        for index, (_, media_url, key) in enumerate(
+            unique
+        ):
+
+            expected = (
+                "video"
+                if "video" in key
+                or "play" in key
+                else None
             )
 
             path = download_direct(
                 media_url,
-                job_dir,
-                url,
+                folder,
+                index,
+                expected
             )
 
-            if not path:
-                continue
+            if path:
+                files.append(path)
 
-            if is_image(path):
-
-                results.append(
-                    (path, False)
-                )
-
-            elif is_video(path):
-
-                results.append(
-                    (path, True)
-                )
-
-            if len(results) >= MAX_MEDIA_PER_LINK:
-                break
-
-        return results
+        return files
 
     except Exception as e:
-
-        log(
-            f"INSTAGRAM RAPIDAPI ERROR: {e}"
-        )
-
+        log(f"RapidAPI error: {e}")
         return []
 
 
 # =========================================================
-# INSTAGRAM HTML FALLBACK
+# INSTAGRAM EMBED
 # =========================================================
 
-def instagram_html(
-    url,
-    job_dir,
-):
+def instagram_embed_urls(url):
+    """
+    Try Instagram's embed page.
+    """
+
+    results = []
+
+    parsed = urlparse(url)
+
+    clean_path = parsed.path.rstrip("/")
+
+    if not clean_path:
+        return results
+
+    embed_url = (
+        f"https://www.instagram.com"
+        f"{clean_path}/embed/"
+    )
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
     try:
 
-        headers = dict(HEADERS)
-
-        headers["Referer"] = (
-            "https://www.instagram.com/"
+        log(
+            f"Instagram EMBED: {embed_url}"
         )
 
         response = requests.get(
-            url,
+            embed_url,
             headers=headers,
-            timeout=35,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
         )
 
         log(
-            f"INSTAGRAM HTML: "
+            f"Instagram EMBED: "
             f"{response.status_code} "
             f"length={len(response.text)}"
         )
 
         if response.status_code != 200:
-            return []
+            return results
 
-        images, videos = extract_meta_urls(
+        soup = BeautifulSoup(
             response.text,
-            response.url,
+            "html.parser"
         )
 
-        results = []
+        # Meta tags first
+        for tag in soup.find_all(
+            "meta"
+        ):
 
-        for media_url in images[:5]:
+            content = tag.get("content")
 
-            path = download_direct(
-                media_url,
-                job_dir,
-                response.url,
+            if not content:
+                continue
+
+            if looks_like_media_url(content):
+                results.append(content)
+
+        # Scripts
+        for script in soup.find_all(
+            "script"
+        ):
+
+            text = script.string or script.get_text(
+                strip=False
             )
 
-            if path and is_image(path):
+            if not text:
+                continue
 
-                results.append(
-                    (path, False)
-                )
-
-        for media_url in videos[:3]:
-
-            path = download_direct(
-                media_url,
-                job_dir,
-                response.url,
+            results.extend(
+                extract_urls_from_text(text)
             )
 
-            if path and is_video(path):
+        # Direct HTML URLs
+        results.extend(
+            extract_urls_from_text(
+                response.text
+            )
+        )
 
-                results.append(
-                    (path, True)
-                )
+        # Deduplicate
+        final = []
+        seen = set()
 
-        return results
+        for item in results:
+
+            item = normalize_extracted_url(
+                item,
+                embed_url
+            )
+
+            if not item:
+                continue
+
+            if not looks_like_media_url(item):
+                continue
+
+            if item in seen:
+                continue
+
+            seen.add(item)
+            final.append(item)
+
+        return final[:MAX_MEDIA_PER_LINK]
 
     except Exception as e:
-
-        log(
-            f"INSTAGRAM HTML ERROR: {e}"
-        )
-
+        log(f"Instagram embed error: {e}")
         return []
 
 
 # =========================================================
-# TIKTOK
+# INSTAGRAM NORMAL HTML
 # =========================================================
 
-def tiktok_api(
-    url,
-    job_dir,
-):
+def instagram_html_urls(url):
+
+    results = []
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+    }
+
     try:
 
+        log("Instagram HTML request...")
+
         response = requests.get(
-            "https://www.tikwm.com/api/",
-            params={
-                "url": url,
-                "hd": 1,
-            },
-            headers=HEADERS,
-            timeout=45,
+            url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
         )
 
         log(
-            f"TIKTOK API: "
-            f"{response.status_code}"
+            f"Instagram HTML: "
+            f"{response.status_code} "
+            f"length={len(response.text)}"
         )
 
         if response.status_code != 200:
-            return []
+            return results
 
-        data = response.json()
+        html = response.text
 
-        payload = data.get(
-            "data"
-        ) or {}
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
 
-        results = []
+        # -------------------------------------------------
+        # META
+        # -------------------------------------------------
 
-        # -----------------------------
-        # VIDEO
-        # -----------------------------
+        for tag in soup.find_all("meta"):
 
-        for key in (
-            "hdplay",
-            "play",
-            "wmplay",
-            "download",
-        ):
+            prop = (
+                tag.get("property")
+                or tag.get("name")
+                or ""
+            ).lower()
 
-            value = payload.get(key)
+            content = tag.get("content")
 
-            if (
-                isinstance(value, str)
-                and value.startswith("http")
+            if not content:
+                continue
+
+            if prop in (
+                "og:image",
+                "og:video",
+                "og:video:url",
+                "og:video:secure_url",
+                "twitter:image"
             ):
 
-                path = download_direct(
-                    value,
-                    job_dir,
-                    "https://www.tiktok.com/",
+                if looks_like_media_url(content):
+                    results.append(content)
+
+        # -------------------------------------------------
+        # JSON-LD
+        # -------------------------------------------------
+
+        for script in soup.find_all(
+            "script",
+            attrs={"type": "application/ld+json"}
+        ):
+
+            text = script.string or script.get_text(
+                strip=False
+            )
+
+            if not text:
+                continue
+
+            try:
+
+                data = json.loads(text)
+
+                candidates = extract_urls_recursive(
+                    data
                 )
 
-                if path and is_video(path):
+                for _, media_url, _ in candidates:
+                    results.append(media_url)
 
-                    results.append(
-                        (path, True)
-                    )
+            except Exception:
+                pass
 
-                    break
+        # -------------------------------------------------
+        # SCRIPT URLS
+        # -------------------------------------------------
 
-        # -----------------------------
-        # PHOTOS
-        # -----------------------------
+        for script in soup.find_all("script"):
 
-        images = payload.get(
-            "images"
+            text = script.string or script.get_text(
+                strip=False
+            )
+
+            if not text:
+                continue
+
+            results.extend(
+                extract_urls_from_text(text)
+            )
+
+        # -------------------------------------------------
+        # RAW HTML
+        # -------------------------------------------------
+
+        results.extend(
+            extract_urls_from_text(html)
         )
 
-        if isinstance(images, list):
+        final = []
+        seen = set()
 
-            for image_url in images[:10]:
+        for item in results:
 
-                if not isinstance(
-                    image_url,
-                    str,
-                ):
-                    continue
+            item = normalize_extracted_url(
+                item,
+                url
+            )
 
-                path = download_direct(
-                    image_url,
-                    job_dir,
-                    "https://www.tiktok.com/",
-                )
+            if not item:
+                continue
 
-                if path and is_image(path):
+            if not looks_like_media_url(item):
+                continue
 
-                    results.append(
-                        (path, False)
-                    )
+            if item in seen:
+                continue
 
-        return results
-
-    except Exception as e:
+            seen.add(item)
+            final.append(item)
 
         log(
-            f"TIKTOK API ERROR: {e}"
+            f"Instagram HTML media candidates: "
+            f"{len(final)}"
         )
 
+        return final[:MAX_MEDIA_PER_LINK]
+
+    except Exception as e:
+        log(f"Instagram HTML error: {e}")
         return []
+
+
+# =========================================================
+# INSTAGRAM DOWNLOAD
+# =========================================================
+
+def instagram_from_urls(urls, folder):
+
+    files = []
+
+    for index, media_url in enumerate(urls):
+
+        if len(files) >= MAX_MEDIA_PER_LINK:
+            break
+
+        expected = (
+            "video"
+            if any(
+                x in media_url.lower()
+                for x in (
+                    ".mp4",
+                    ".mov",
+                    ".m4v",
+                    ".webm",
+                    "video"
+                )
+            )
+            else None
+        )
+
+        path = download_direct(
+            media_url,
+            folder,
+            index,
+            expected
+        )
+
+        if not path:
+            continue
+
+        # Never send weird binary files
+        if path.lower().endswith(
+            (
+                ".bin",
+                ".html",
+                ".txt"
+            )
+        ):
+            remove_file(path)
+            continue
+
+        files.append(path)
+
+    return files
 
 
 # =========================================================
 # YT-DLP
 # =========================================================
 
-def ytdlp_download(
-    url,
-    job_dir,
-):
-    log(
-        f"YT-DLP START: {url}"
-    )
+def yt_dlp_download(url, folder):
 
     before = set(
         glob.glob(
-            os.path.join(
-                job_dir,
-                "**",
-                "*",
-            ),
-            recursive=True,
+            os.path.join(folder, "*")
         )
     )
 
-    ffmpeg = (
-        imageio_ffmpeg
-        .get_ffmpeg_exe()
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+    output_template = os.path.join(
+        folder,
+        "%(title).80s_%(id)s.%(ext)s"
     )
 
-    options = {
-
-        "outtmpl": os.path.join(
-            job_dir,
-            "%(title).80s_%(id)s.%(ext)s",
-        ),
+    ydl_opts = {
+        "outtmpl": output_template,
 
         "format": (
             "bestvideo*+bestaudio/"
@@ -1300,417 +1059,378 @@ def ytdlp_download(
 
         "merge_output_format": "mp4",
 
-        "ffmpeg_location": ffmpeg,
-
         "noplaylist": True,
 
         "quiet": False,
 
         "no_warnings": False,
 
-        "retries": 3,
+        "retries": 2,
 
-        "fragment_retries": 3,
+        "fragment_retries": 2,
 
         "socket_timeout": 30,
 
-        "http_headers": HEADERS,
+        "ffmpeg_location": ffmpeg_path,
 
-        "restrictfilenames": True,
+        "http_headers": {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9"
+        },
+
+        "extractor_args": {
+            "instagram": {
+                "include_stories": "false"
+            }
+        }
     }
 
-    if os.path.exists(
+    # Public cookies file can optionally be supplied.
+    # DO NOT put secrets/tokens directly in this code.
+    cookies_path = os.path.join(
+        os.getcwd(),
         "cookies.txt"
-    ):
+    )
 
-        options["cookiefile"] = (
-            "cookies.txt"
-        )
-
-        log(
-            "YT-DLP: cookies.txt enabled"
-        )
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+        log("yt-dlp: cookies.txt detected")
 
     try:
 
+        log(f"YT-DLP START: {url}")
+
         with yt_dlp.YoutubeDL(
-            options
+            ydl_opts
         ) as ydl:
 
-            info = ydl.extract_info(
-                url,
-                download=True,
-            )
-
-            if info:
-
-                log(
-                    "YT-DLP: "
-                    f"{info.get('title', 'unknown')}"
-                )
+            ydl.download([url])
 
         after = set(
             glob.glob(
-                os.path.join(
-                    job_dir,
-                    "**",
-                    "*",
-                ),
-                recursive=True,
+                os.path.join(folder, "*")
             )
         )
 
-        files = [
-            path
-            for path in (after - before)
-            if os.path.isfile(path)
-        ]
-
-        results = []
-
-        for path in files:
-
-            if path.endswith(
-                (
-                    ".part",
-                    ".ytdl",
-                )
-            ):
-                continue
-
-            try:
-
-                size = os.path.getsize(
-                    path
-                )
-
-            except Exception:
-                continue
-
-            if size == 0:
-                continue
-
-            if size > MAX_FILE_SIZE:
-                continue
-
-            if is_video(path):
-
-                results.append(
-                    (path, True)
-                )
-
-            elif is_image(path):
-
-                if validate_image(path):
-
-                    results.append(
-                        (path, False)
-                    )
-
-        log(
-            f"YT-DLP RESULT: "
-            f"{len(results)} files"
+        new_files = list(
+            after - before
         )
 
-        return results
+        valid = []
+
+        for path in new_files:
+
+            if not os.path.isfile(path):
+                continue
+
+            if is_too_large(path):
+                remove_file(path)
+                continue
+
+            if os.path.splitext(
+                path
+            )[1].lower() in (
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+                ".gif"
+            ):
+
+                if not is_image_file(path):
+                    remove_file(path)
+                    continue
+
+            valid.append(path)
+
+        log(
+            f"YT-DLP files: {len(valid)}"
+        )
+
+        return valid
 
     except Exception as e:
 
         log(
-            f"YT-DLP ERROR: "
-            f"{type(e).__name__}: {e}"
+            f"YT-DLP ERROR: {e}"
         )
 
         return []
 
 
 # =========================================================
-# PLATFORM EXTRACTION
+# INSTAGRAM MAIN
 # =========================================================
 
-async def extract_media(url):
+def download_instagram(url, folder):
 
-    job_dir = create_job()
+    log("================================")
+    log("INSTAGRAM")
+    log("================================")
 
-    results = []
+    # -----------------------------------------------------
+    # 1. RAPIDAPI
+    # -----------------------------------------------------
 
-    try:
+    files = rapidapi_instagram(
+        url,
+        folder
+    )
 
-        # =================================================
-        # INSTAGRAM
-        # =================================================
-
-        if is_instagram(url):
-
-            log(
-                "========== INSTAGRAM =========="
-            )
-
-            results = await asyncio.to_thread(
-                instagram_rapidapi,
-                url,
-                job_dir,
-            )
-
-            if not results:
-
-                log(
-                    "IG: RapidAPI failed"
-                )
-
-                results = await asyncio.to_thread(
-                    instagram_html,
-                    url,
-                    job_dir,
-                )
-
-            if not results:
-
-                log(
-                    "IG: HTML failed -> yt-dlp"
-                )
-
-                results = await asyncio.to_thread(
-                    ytdlp_download,
-                    url,
-                    job_dir,
-                )
-
-        # =================================================
-        # FACEBOOK
-        # =================================================
-
-        elif is_facebook(url):
-
-            log(
-                "========== FACEBOOK =========="
-            )
-
-            results = await asyncio.to_thread(
-                social_html_download,
-                url,
-                job_dir,
-            )
-
-            if not results:
-
-                log(
-                    "FB: HTML failed -> yt-dlp"
-                )
-
-                results = await asyncio.to_thread(
-                    ytdlp_download,
-                    url,
-                    job_dir,
-                )
-
-        # =================================================
-        # X / TWITTER
-        # =================================================
-
-        elif is_x(url):
-
-            log(
-                "========== X / TWITTER =========="
-            )
-
-            results = await asyncio.to_thread(
-                social_html_download,
-                url,
-                job_dir,
-            )
-
-            if not results:
-
-                log(
-                    "X: HTML failed -> yt-dlp"
-                )
-
-                results = await asyncio.to_thread(
-                    ytdlp_download,
-                    url,
-                    job_dir,
-                )
-
-        # =================================================
-        # TIKTOK
-        # =================================================
-
-        elif is_tiktok(url):
-
-            log(
-                "========== TIKTOK =========="
-            )
-
-            results = await asyncio.to_thread(
-                tiktok_api,
-                url,
-                job_dir,
-            )
-
-            if not results:
-
-                log(
-                    "TikTok API failed -> yt-dlp"
-                )
-
-                results = await asyncio.to_thread(
-                    ytdlp_download,
-                    url,
-                    job_dir,
-                )
-
-        # =================================================
-        # GENERIC
-        # =================================================
-
-        else:
-
-            log(
-                "========== GENERIC =========="
-            )
-
-            results = await asyncio.to_thread(
-                ytdlp_download,
-                url,
-                job_dir,
-            )
-
-        # =================================================
-        # DEDUPLICATE
-        # =================================================
-
-        unique = []
-
-        seen = set()
-
-        for path, video in results:
-
-            if not os.path.exists(path):
-                continue
-
-            real_path = os.path.realpath(
-                path
-            )
-
-            if real_path in seen:
-                continue
-
-            seen.add(
-                real_path
-            )
-
-            unique.append(
-                (path, video)
-            )
-
-        return job_dir, unique
-
-    except Exception as e:
-
+    if files:
         log(
-            f"EXTRACT ERROR: {e}"
+            f"Instagram SUCCESS via RapidAPI: "
+            f"{len(files)} files"
         )
 
-        return job_dir, []
+        return files
+
+    log(
+        "Instagram: RapidAPI produced no usable media"
+    )
+
+    # -----------------------------------------------------
+    # 2. EMBED
+    # -----------------------------------------------------
+
+    embed_urls = instagram_embed_urls(
+        url
+    )
+
+    if embed_urls:
+
+        log(
+            f"Instagram EMBED candidates: "
+            f"{len(embed_urls)}"
+        )
+
+        files = instagram_from_urls(
+            embed_urls,
+            folder
+        )
+
+        if files:
+            log(
+                f"Instagram SUCCESS via EMBED: "
+                f"{len(files)} files"
+            )
+
+            return files
+
+    # -----------------------------------------------------
+    # 3. NORMAL HTML
+    # -----------------------------------------------------
+
+    html_urls = instagram_html_urls(
+        url
+    )
+
+    if html_urls:
+
+        log(
+            f"Instagram HTML candidates: "
+            f"{len(html_urls)}"
+        )
+
+        files = instagram_from_urls(
+            html_urls,
+            folder
+        )
+
+        if files:
+            log(
+                f"Instagram SUCCESS via HTML: "
+                f"{len(files)} files"
+            )
+
+            return files
+
+    # -----------------------------------------------------
+    # 4. YT-DLP
+    # -----------------------------------------------------
+
+    log(
+        "Instagram: HTML failed -> yt-dlp"
+    )
+
+    files = yt_dlp_download(
+        url,
+        folder
+    )
+
+    if files:
+        return files
+
+    return []
 
 
 # =========================================================
-# TELEGRAM SEND
+# TIKTOK
 # =========================================================
 
-async def send_one(
-    message,
-    path,
-    video,
-):
+def tiktok_download(url, folder):
+
+    log("================================")
+    log("TIKTOK")
+    log("================================")
+
+    # Try yt-dlp first
+    files = yt_dlp_download(
+        url,
+        folder
+    )
+
+    if files:
+        return files
+
+    return []
+
+
+# =========================================================
+# FACEBOOK / X
+# =========================================================
+
+def generic_social_download(url, folder):
+
+    log("================================")
+    log(f"GENERIC: {detect_platform(url)}")
+    log("================================")
+
+    # HTML meta extraction first
+    try:
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
+        )
+
+        if response.status_code == 200:
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            candidates = []
+
+            for tag in soup.find_all("meta"):
+
+                prop = (
+                    tag.get("property")
+                    or tag.get("name")
+                    or ""
+                ).lower()
+
+                content = tag.get("content")
+
+                if not content:
+                    continue
+
+                if prop in (
+                    "og:image",
+                    "og:video",
+                    "og:video:url",
+                    "og:video:secure_url",
+                    "twitter:image"
+                ):
+
+                    if looks_like_media_url(content):
+                        candidates.append(content)
+
+            files = instagram_from_urls(
+                candidates,
+                folder
+            )
+
+            if files:
+                return files
+
+    except Exception as e:
+        log(f"Generic HTML error: {e}")
+
+    # yt-dlp
+    return yt_dlp_download(
+        url,
+        folder
+    )
+
+
+# =========================================================
+# DOWNLOAD DISPATCHER
+# =========================================================
+
+def download_url(url, folder):
+
+    platform = detect_platform(url)
+
+    log(
+        f"Platform detected: {platform}"
+    )
+
+    if platform == "instagram":
+        return download_instagram(
+            url,
+            folder
+        )
+
+    if platform == "tiktok":
+        return tiktok_download(
+            url,
+            folder
+        )
+
+    if platform in (
+        "facebook",
+        "twitter"
+    ):
+        return generic_social_download(
+            url,
+            folder
+        )
+
+    return yt_dlp_download(
+        url,
+        folder
+    )
+
+
+# =========================================================
+# TELEGRAM SENDING
+# =========================================================
+
+async def send_one(message, path):
+
     if not os.path.exists(path):
         return False
 
-    try:
+    ext = os.path.splitext(
+        path
+    )[1].lower()
 
-        size = os.path.getsize(
-            path
-        )
+    # -----------------------------------------------------
+    # VIDEO
+    # -----------------------------------------------------
 
-        if size > MAX_FILE_SIZE:
-
-            await message.reply_text(
-                "❌ الملف أكبر من الحد المسموح."
-            )
-
-            return False
-
-        # =================================================
-        # VIDEO
-        # =================================================
-
-        if video or is_video(path):
-
-            try:
-
-                await message.reply_video(
-                    path,
-                    supports_streaming=True,
-                )
-
-                log(
-                    "TELEGRAM: video sent"
-                )
-
-                return True
-
-            except Exception as e:
-
-                log(
-                    f"VIDEO SEND ERROR: {e}"
-                )
-
-                try:
-
-                    await message.reply_document(
-                        path
-                    )
-
-                    log(
-                        "TELEGRAM: video sent as document"
-                    )
-
-                    return True
-
-                except Exception as e2:
-
-                    log(
-                        f"VIDEO DOCUMENT ERROR: {e2}"
-                    )
-
-                    return False
-
-        # =================================================
-        # IMAGE
-        # =================================================
-
-        jpg = await asyncio.to_thread(
-            convert_to_jpg,
-            path,
-        )
-
-        if not jpg:
-
-            log(
-                "TELEGRAM: image conversion failed"
-            )
-
-            return False
+    if ext in (
+        ".mp4",
+        ".mov",
+        ".m4v",
+        ".webm",
+        ".mkv"
+    ):
 
         try:
 
-            await message.reply_photo(
-                jpg
-            )
-
-            log(
-                "TELEGRAM: photo sent"
+            await message.reply_video(
+                video=path,
+                supports_streaming=True
             )
 
             return True
@@ -1718,18 +1438,13 @@ async def send_one(
         except Exception as e:
 
             log(
-                f"PHOTO SEND ERROR: {e}"
+                f"Video send failed: {e}"
             )
 
-            # Fallback
             try:
 
                 await message.reply_document(
-                    jpg
-                )
-
-                log(
-                    "TELEGRAM: photo sent as document"
+                    document=path
                 )
 
                 return True
@@ -1737,52 +1452,177 @@ async def send_one(
             except Exception as e2:
 
                 log(
-                    f"PHOTO DOCUMENT ERROR: {e2}"
+                    f"Video document fallback failed: "
+                    f"{e2}"
                 )
 
                 return False
 
+    # -----------------------------------------------------
+    # IMAGE
+    # -----------------------------------------------------
+
+    if ext in (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".bmp"
+    ):
+
+        folder = os.path.dirname(path)
+
+        jpg = convert_to_jpg(
+            path,
+            folder
+        )
+
+        if not jpg:
+            return False
+
+        try:
+
+            await message.reply_photo(
+                photo=jpg
+            )
+
+            if jpg != path:
+                remove_file(jpg)
+
+            return True
+
+        except Exception as e:
+
+            log(
+                f"Photo send failed: {e}"
+            )
+
+            try:
+
+                await message.reply_document(
+                    document=jpg
+                )
+
+                if jpg != path:
+                    remove_file(jpg)
+
+                return True
+
+            except Exception as e2:
+
+                log(
+                    f"Photo document fallback failed: "
+                    f"{e2}"
+                )
+
+                if jpg != path:
+                    remove_file(jpg)
+
+                return False
+
+    # -----------------------------------------------------
+    # OTHER
+    # -----------------------------------------------------
+
+    try:
+
+        await message.reply_document(
+            document=path
+        )
+
+        return True
+
     except Exception as e:
 
         log(
-            f"SEND ERROR: {e}"
+            f"Document send failed: {e}"
         )
 
         return False
 
 
 # =========================================================
-# SEND ALL
+# SEND ALL FILES
 # =========================================================
 
-async def send_all(
-    message,
-    media,
-):
+async def send_files(message, files):
+
     sent = 0
 
-    media = media[
-        :MAX_MEDIA_PER_LINK
-    ]
+    for path in files:
 
-    for path, video in media:
+        if sent >= MAX_MEDIA_PER_LINK:
+            break
 
-        if not os.path.exists(path):
-            continue
+        try:
 
-        if await send_one(
-            message,
-            path,
-            video,
-        ):
+            ok = await send_one(
+                message,
+                path
+            )
 
-            sent += 1
+            if ok:
+                sent += 1
 
-        await asyncio.sleep(
-            0.5
-        )
+        except Exception as e:
+
+            log(
+                f"Send error: {e}"
+            )
+
+        await asyncio.sleep(0.5)
 
     return sent
+
+
+# =========================================================
+# CLEAN JOB
+# =========================================================
+
+def cleanup_folder(folder):
+
+    try:
+
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+
+    except Exception as e:
+
+        log(
+            f"Cleanup error: {e}"
+        )
+
+
+# =========================================================
+# URL EXTRACTION FROM TELEGRAM MESSAGE
+# =========================================================
+
+URL_PATTERN = re.compile(
+    r"https?://[^\s<>\"]+",
+    re.IGNORECASE
+)
+
+
+def extract_urls(text):
+
+    if not text:
+        return []
+
+    urls = URL_PATTERN.findall(
+        text
+    )
+
+    final = []
+
+    for url in urls:
+
+        url = clean_url(url)
+
+        if is_valid_url(url):
+            final.append(url)
+
+    return final
 
 
 # =========================================================
@@ -1790,158 +1630,129 @@ async def send_all(
 # =========================================================
 
 @app.on_message(
-    filters.private & filters.text
+    filters.private
+    & filters.text
 )
-async def handle_message(
-    client,
-    message,
-):
-    url = extract_url(
-        message.text
+async def handle_message(client, message):
+
+    urls = extract_urls(
+        message.text or ""
     )
 
-    if not url:
+    if not urls:
 
         await message.reply_text(
-            "📎 أرسل رابط Instagram أو "
-            "TikTok أو Facebook أو X/Twitter."
+            "🔗 أرسل رابط Instagram أو TikTok أو Facebook أو X."
         )
 
         return
 
-    log(
-        "================================"
-    )
+    # Only process first 5 URLs per message
+    urls = urls[:5]
 
-    log(
-        f"NEW URL: {url}"
-    )
+    for url in urls:
 
-    log(
-        "================================"
-    )
-
-    status = await message.reply_text(
-        "⏳ جاري الفحص..."
-    )
-
-    job_dir = None
-
-    try:
-
-        if is_instagram(url):
-
-            await status.edit_text(
-                "📸 جاري استخراج محتوى Instagram..."
-            )
-
-        elif is_tiktok(url):
-
-            await status.edit_text(
-                "🎵 جاري استخراج محتوى TikTok..."
-            )
-
-        elif is_facebook(url):
-
-            await status.edit_text(
-                "📘 جاري استخراج محتوى Facebook..."
-            )
-
-        elif is_x(url):
-
-            await status.edit_text(
-                "𝕏 جاري استخراج محتوى X/Twitter..."
-            )
-
-        else:
-
-            await status.edit_text(
-                "⬇️ جاري تحميل المحتوى..."
-            )
-
-        job_dir, media = await extract_media(
+        platform = detect_platform(
             url
         )
 
-        if not media:
+        job_id = (
+            f"{message.chat.id}_"
+            f"{message.id}_"
+            f"{abs(hash(url))}"
+        )
 
-            await status.edit_text(
-                "❌ ما گدرت أستخرج المحتوى من الرابط.\n\n"
-                "ممكن المنشور خاص أو الموقع منع الوصول "
-                "أو الرابط غير مدعوم حاليًا."
+        folder = os.path.join(
+            DOWNLOAD_DIR,
+            str(job_id)
+        )
+
+        os.makedirs(
+            folder,
+            exist_ok=True
+        )
+
+        status = await message.reply_text(
+            f"⏳ جاري استخراج محتوى {platform.upper()}..."
+        )
+
+        log("================================")
+        log(f"NEW URL: {url}")
+        log(f"PLATFORM: {platform}")
+        log("================================")
+
+        try:
+
+            files = await asyncio.to_thread(
+                download_url,
+                url,
+                folder
             )
 
-            return
+            if not files:
 
-        log(
-            f"MEDIA FOUND: {len(media)}"
-        )
+                await status.edit_text(
+                    "❌ ماكدرت أستخرج المحتوى من الرابط.\n\n"
+                    "ممكن المنشور خاص أو الموقع مانع الوصول "
+                    "أو الرابط غير مدعوم حاليًا."
+                )
 
-        await status.edit_text(
-            f"📦 تم العثور على {len(media)} ملف.\n"
-            "📤 جاري الإرسال..."
-        )
+                cleanup_folder(
+                    folder
+                )
 
-        sent = await send_all(
-            message,
-            media,
-        )
+                continue
 
-        log(
-            f"SENT: {sent}/{len(media)}"
-        )
+            # Limit files
+            files = files[
+                :MAX_MEDIA_PER_LINK
+            ]
 
-        if sent:
+            await status.edit_text(
+                f"📦 تم استخراج {len(files)} ملف.\n"
+                f"📤 جاري الإرسال..."
+            )
+
+            sent = await send_files(
+                message,
+                files
+            )
 
             await status.edit_text(
                 f"✅ تم إرسال {sent} ملف."
             )
 
-        else:
+        except Exception as e:
 
-            await status.edit_text(
-                "❌ حصلت الملفات لكن فشل إرسالها."
+            log(
+                f"JOB ERROR: {e}"
             )
 
-    except Exception as e:
+            try:
 
-        log(
-            f"HANDLER ERROR: {type(e).__name__}: {e}"
-        )
+                await status.edit_text(
+                    "❌ صار خطأ أثناء معالجة الرابط."
+                )
 
-        try:
+            except Exception:
+                pass
 
-            await status.edit_text(
-                "❌ حدث خطأ أثناء المعالجة."
+        finally:
+
+            cleanup_folder(
+                folder
             )
-
-        except Exception:
-            pass
-
-    finally:
-
-        cleanup(
-            job_dir
-        )
-
-        log(
-            "================================"
-        )
 
 
 # =========================================================
-# START
+# STARTUP
 # =========================================================
 
-if __name__ == "__main__":
+async def startup_log():
 
-    log(
-        "========================================"
-    )
-
-    log(
-        "TELEGRAM DOWNLOADER BOT STARTING"
-    )
+    log("================================")
+    log("TELEGRAM DOWNLOADER BOT STARTING")
+    log("================================")
 
     log(
         f"RapidAPI configured: "
@@ -1954,7 +1765,22 @@ if __name__ == "__main__":
     )
 
     log(
-        "========================================"
+        f"Max media per link: "
+        f"{MAX_MEDIA_PER_LINK}"
+    )
+
+    log("================================")
+
+
+if __name__ == "__main__":
+
+    os.makedirs(
+        DOWNLOAD_DIR,
+        exist_ok=True
+    )
+
+    asyncio.get_event_loop().run_until_complete(
+        startup_log()
     )
 
     app.run()
