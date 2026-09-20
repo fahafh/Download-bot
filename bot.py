@@ -11,8 +11,12 @@ import requests
 import yt_dlp
 import imageio_ffmpeg
 
+from PIL import Image, ImageOps
+
 from bs4 import BeautifulSoup
+
 from pyrogram import Client, filters
+
 from pyrogram.types import (
     Message,
     InputMediaPhoto,
@@ -44,7 +48,10 @@ DOWNLOAD_DIR = "downloads"
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(
+    DOWNLOAD_DIR,
+    exist_ok=True
+)
 
 
 # =========================================================
@@ -60,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# BOT
+# TELEGRAM CLIENT
 # =========================================================
 
 app = Client(
@@ -79,7 +86,7 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 
 # =========================================================
-# HEADERS
+# BROWSER HEADERS
 # =========================================================
 
 BROWSER_HEADERS = {
@@ -89,7 +96,11 @@ BROWSER_HEADERS = {
         "(KHTML, like Gecko) "
         "Chrome/140.0 Mobile Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9",
+
+    "Accept-Language": (
+        "en-US,en;q=0.9"
+    ),
+
     "Accept": (
         "text/html,application/xhtml+xml,"
         "application/xml;q=0.9,image/avif,"
@@ -153,6 +164,10 @@ def is_tiktok_url(url: str) -> bool:
     )
 
 
+# =========================================================
+# FILE EXTENSION
+# =========================================================
+
 def get_extension_from_response(
     response,
     default="jpg"
@@ -172,6 +187,7 @@ def get_extension_from_response(
         "image/png": "png",
         "image/webp": "webp",
         "image/gif": "gif",
+
         "video/mp4": "mp4",
         "video/webm": "webm",
         "video/quicktime": "mov",
@@ -182,6 +198,10 @@ def get_extension_from_response(
         default
     )
 
+
+# =========================================================
+# INSTAGRAM CDN URL CHECK
+# =========================================================
 
 def is_allowed_media_url(url: str) -> bool:
 
@@ -207,12 +227,14 @@ def is_allowed_media_url(url: str) -> bool:
             or host.endswith("." + item)
             for item in allowed_hosts
         ):
+
             return True
 
         if (
             "instagram" in host
             or "fbcdn" in host
         ):
+
             return True
 
         return False
@@ -222,29 +244,64 @@ def is_allowed_media_url(url: str) -> bool:
         return False
 
 
-def normalize_media_url(url: str) -> str:
+# =========================================================
+# NORMALIZE URL
+# =========================================================
 
-    if not isinstance(url, str):
+def normalize_media_url(
+    url: str
+) -> str:
+
+    if not isinstance(
+        url,
+        str
+    ):
         return ""
 
-    url = html_lib.unescape(url)
+    url = html_lib.unescape(
+        url
+    )
 
-    url = url.replace("\\/", "/")
-    url = url.replace("\\u0026", "&")
-    url = url.replace("\\u003D", "=")
-    url = url.replace("\\u002F", "/")
-    url = url.replace("&amp;", "&")
+    url = url.replace(
+        "\\/",
+        "/"
+    )
+
+    url = url.replace(
+        "\\u0026",
+        "&"
+    )
+
+    url = url.replace(
+        "\\u003D",
+        "="
+    )
+
+    url = url.replace(
+        "\\u002F",
+        "/"
+    )
+
+    url = url.replace(
+        "&amp;",
+        "&"
+    )
 
     try:
-        url = unquote(url)
+
+        url = unquote(
+            url
+        )
+
     except Exception:
+
         pass
 
     return url.strip()
 
 
 # =========================================================
-# MEDIA DOWNLOADER
+# DOWNLOAD MEDIA URL
 # =========================================================
 
 def download_media_url(
@@ -265,7 +322,10 @@ def download_media_url(
 
         headers = {
             "User-Agent":
-                BROWSER_HEADERS["User-Agent"],
+                BROWSER_HEADERS[
+                    "User-Agent"
+                ],
+
             "Referer":
                 "https://www.instagram.com/"
         }
@@ -281,9 +341,16 @@ def download_media_url(
 
         content_type = (
             response.headers
-            .get("Content-Type", "")
+            .get(
+                "Content-Type",
+                ""
+            )
             .lower()
         )
+
+        # ---------------------------------------------
+        # IMAGE CHECK
+        # ---------------------------------------------
 
         if (
             not is_video
@@ -296,6 +363,10 @@ def download_media_url(
             )
 
             return None
+
+        # ---------------------------------------------
+        # VIDEO CHECK
+        # ---------------------------------------------
 
         if is_video:
 
@@ -311,6 +382,10 @@ def download_media_url(
 
                 return None
 
+        # ---------------------------------------------
+        # EXTENSION
+        # ---------------------------------------------
+
         ext = get_extension_from_response(
             response,
             default_ext
@@ -324,6 +399,7 @@ def download_media_url(
                 "mov",
                 "mkv"
             ]:
+
                 ext = "mp4"
 
         else:
@@ -334,7 +410,12 @@ def download_media_url(
                 "png",
                 "webp"
             ]:
+
                 ext = "jpg"
+
+        # ---------------------------------------------
+        # PATH
+        # ---------------------------------------------
 
         path = os.path.join(
             DOWNLOAD_DIR,
@@ -345,7 +426,14 @@ def download_media_url(
 
         total = 0
 
-        with open(path, "wb") as file:
+        # ---------------------------------------------
+        # DOWNLOAD
+        # ---------------------------------------------
+
+        with open(
+            path,
+            "wb"
+        ) as file:
 
             for chunk in response.iter_content(
                 chunk_size=1024 * 1024
@@ -374,6 +462,10 @@ def download_media_url(
 
                 file.write(chunk)
 
+        # ---------------------------------------------
+        # CHECK
+        # ---------------------------------------------
+
         if (
             os.path.exists(path)
             and os.path.getsize(path) > 0
@@ -397,7 +489,7 @@ def download_media_url(
 
 
 # =========================================================
-# RAPIDAPI HELPERS
+# RAPIDAPI JSON MEDIA COLLECTOR
 # =========================================================
 
 def _collect_media_dicts(
@@ -408,7 +500,10 @@ def _collect_media_dicts(
     if results is None:
         results = []
 
-    if isinstance(obj, dict):
+    if isinstance(
+        obj,
+        dict
+    ):
 
         possible_keys = [
             "url",
@@ -422,24 +517,35 @@ def _collect_media_dicts(
 
         for key in possible_keys:
 
-            value = obj.get(key)
+            value = obj.get(
+                key
+            )
 
-            if isinstance(value, str):
+            if isinstance(
+                value,
+                str
+            ):
 
                 value = normalize_media_url(
                     value
                 )
 
-                if value.startswith("http"):
+                if value.startswith(
+                    "http"
+                ):
 
                     results.append({
                         "url": value,
+
                         "type": (
                             "video"
                             if (
-                                "video" in key.lower()
-                                or ".mp4" in value.lower()
-                                or "video" in value.lower()
+                                "video"
+                                in key.lower()
+                                or ".mp4"
+                                in value.lower()
+                                or "video"
+                                in value.lower()
                             )
                             else "image"
                         )
@@ -452,7 +558,10 @@ def _collect_media_dicts(
                 results
             )
 
-    elif isinstance(obj, list):
+    elif isinstance(
+        obj,
+        list
+    ):
 
         for item in obj:
 
@@ -464,15 +573,25 @@ def _collect_media_dicts(
     return results
 
 
-def _find_media_list(obj):
+def _find_media_list(
+    obj
+):
 
-    if isinstance(obj, dict):
+    if isinstance(
+        obj,
+        dict
+    ):
 
         for key, value in obj.items():
 
-            key_lower = str(key).lower()
+            key_lower = str(
+                key
+            ).lower()
 
-            if isinstance(value, list):
+            if isinstance(
+                value,
+                list
+            ):
 
                 if any(
                     word in key_lower
@@ -494,7 +613,10 @@ def _find_media_list(obj):
                 if found:
                     return found
 
-            elif isinstance(value, dict):
+            elif isinstance(
+                value,
+                dict
+            ):
 
                 found = _find_media_list(
                     value
@@ -503,7 +625,10 @@ def _find_media_list(obj):
                 if found:
                     return found
 
-    elif isinstance(obj, list):
+    elif isinstance(
+        obj,
+        list
+    ):
 
         return obj
 
@@ -511,10 +636,12 @@ def _find_media_list(obj):
 
 
 # =========================================================
-# RAPIDAPI INSTAGRAM
+# INSTAGRAM RAPIDAPI
 # =========================================================
 
-def fetch_instagram_media(url):
+def fetch_instagram_media(
+    url
+):
 
     if not RAPIDAPI_KEY:
 
@@ -524,17 +651,26 @@ def fetch_instagram_media(url):
 
         return []
 
-    clean = clean_url(url)
+    clean = clean_url(
+        url
+    )
 
     endpoint = (
-        f"https://{RAPIDAPI_HOST}/instagram/"
+        f"https://{RAPIDAPI_HOST}"
+        "/instagram/"
     )
 
     headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST,
+        "x-rapidapi-key":
+            RAPIDAPI_KEY,
+
+        "x-rapidapi-host":
+            RAPIDAPI_HOST,
+
         "User-Agent":
-            BROWSER_HEADERS["User-Agent"]
+            BROWSER_HEADERS[
+                "User-Agent"
+            ]
     }
 
     params = {
@@ -544,7 +680,7 @@ def fetch_instagram_media(url):
     try:
 
         logger.info(
-            f"Instagram RapidAPI request: "
+            "Instagram RapidAPI request: "
             f"{clean}"
         )
 
@@ -556,7 +692,7 @@ def fetch_instagram_media(url):
         )
 
         logger.info(
-            f"Instagram API status: "
+            "Instagram API status: "
             f"{response.status_code}"
         )
 
@@ -584,9 +720,14 @@ def fetch_instagram_media(url):
             )[:1200]
         )
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict
+        ):
 
-            if data.get("status") is False:
+            if data.get(
+                "status"
+            ) is False:
 
                 logger.warning(
                     "Instagram API returned "
@@ -597,13 +738,17 @@ def fetch_instagram_media(url):
                 return []
 
         media_objects = (
-            _collect_media_dicts(data)
+            _collect_media_dicts(
+                data
+            )
         )
 
         if not media_objects:
 
-            media_list = _find_media_list(
-                data
+            media_list = (
+                _find_media_list(
+                    data
+                )
             )
 
             if media_list:
@@ -615,12 +760,16 @@ def fetch_instagram_media(url):
                 )
 
         unique = []
+
         seen = set()
 
         for item in media_objects:
 
             media_url = normalize_media_url(
-                item.get("url", "")
+                item.get(
+                    "url",
+                    ""
+                )
             )
 
             if not media_url:
@@ -629,10 +778,13 @@ def fetch_instagram_media(url):
             if media_url in seen:
                 continue
 
-            seen.add(media_url)
+            seen.add(
+                media_url
+            )
 
             unique.append({
                 "url": media_url,
+
                 "type": item.get(
                     "type",
                     "image"
@@ -651,7 +803,9 @@ def fetch_instagram_media(url):
 
         for item in unique:
 
-            media_url = item["url"]
+            media_url = item[
+                "url"
+            ]
 
             media_type = item.get(
                 "type",
@@ -660,22 +814,27 @@ def fetch_instagram_media(url):
 
             is_video = (
                 media_type == "video"
-                or ".mp4" in media_url.lower()
-                or "video" in media_url.lower()
+                or ".mp4"
+                in media_url.lower()
+                or "video"
+                in media_url.lower()
             )
 
             path = download_media_url(
                 media_url,
+
                 prefix=(
                     "ig_video"
                     if is_video
                     else "ig_image"
                 ),
+
                 default_ext=(
                     "mp4"
                     if is_video
                     else "jpg"
                 ),
+
                 is_video=is_video
             )
 
@@ -693,14 +852,15 @@ def fetch_instagram_media(url):
     except Exception as e:
 
         logger.error(
-            f"Instagram RapidAPI failed: {e}"
+            "Instagram RapidAPI failed: "
+            f"{e}"
         )
 
         return []
 
 
 # =========================================================
-# INSTAGRAM HTML / JSON EXTRACTION
+# INSTAGRAM URL EXTRACTION
 # =========================================================
 
 def extract_instagram_urls_from_text(
@@ -717,18 +877,22 @@ def extract_instagram_urls_from_text(
             r'"display_url"\s*:\s*"([^"]+)"',
             "image"
         ),
+
         (
             r'"thumbnail_url"\s*:\s*"([^"]+)"',
             "image"
         ),
+
         (
             r'"video_url"\s*:\s*"([^"]+)"',
             "video"
         ),
+
         (
             r'"contentUrl"\s*:\s*"([^"]+)"',
             "image"
         ),
+
         (
             r'"image_url"\s*:\s*"([^"]+)"',
             "image"
@@ -752,7 +916,9 @@ def extract_instagram_urls_from_text(
                 )
 
                 if (
-                    media_url.startswith("http")
+                    media_url.startswith(
+                        "http"
+                    )
                     and is_allowed_media_url(
                         media_url
                     )
@@ -766,7 +932,10 @@ def extract_instagram_urls_from_text(
         except Exception:
             pass
 
-    # image_versions2 / direct CDN URLs
+    # ---------------------------------------------
+    # DIRECT CDN URLS
+    # ---------------------------------------------
+
     try:
 
         direct_urls = re.findall(
@@ -816,9 +985,17 @@ def extract_instagram_urls_from_text(
     return results
 
 
-def fetch_instagram_html_media(url):
+# =========================================================
+# INSTAGRAM HTML
+# =========================================================
 
-    clean = clean_url(url)
+def fetch_instagram_html_media(
+    url
+):
+
+    clean = clean_url(
+        url
+    )
 
     session = requests.Session()
 
@@ -840,7 +1017,7 @@ def fetch_instagram_html_media(url):
         )
 
         logger.info(
-            f"Instagram HTML status: "
+            "Instagram HTML status: "
             f"{response.status_code}"
         )
 
@@ -864,27 +1041,31 @@ def fetch_instagram_html_media(url):
 
         candidates = []
 
-        # -------------------------------------------------
-        # META TAGS
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # META
+        # ---------------------------------------------
 
         selectors = [
             (
                 "meta[property='og:image']",
                 "image"
             ),
+
             (
                 "meta[name='og:image']",
                 "image"
             ),
+
             (
                 "meta[property='og:image:url']",
                 "image"
             ),
+
             (
                 "meta[property='og:video']",
                 "video"
             ),
+
             (
                 "meta[property='og:video:url']",
                 "video"
@@ -898,11 +1079,16 @@ def fetch_instagram_html_media(url):
             ):
 
                 media_url = normalize_media_url(
-                    tag.get("content", "")
+                    tag.get(
+                        "content",
+                        ""
+                    )
                 )
 
                 if (
-                    media_url.startswith("http")
+                    media_url.startswith(
+                        "http"
+                    )
                     and is_allowed_media_url(
                         media_url
                     )
@@ -913,9 +1099,9 @@ def fetch_instagram_html_media(url):
                         "type": media_type
                     })
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # WHOLE PAGE
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         candidates.extend(
             extract_instagram_urls_from_text(
@@ -923,9 +1109,9 @@ def fetch_instagram_html_media(url):
             )
         )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # SCRIPT TAGS
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         for script in soup.find_all(
             "script"
@@ -948,17 +1134,21 @@ def fetch_instagram_html_media(url):
                 )
             )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # UNIQUE
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         unique = []
+
         seen = set()
 
         for item in candidates:
 
             media_url = normalize_media_url(
-                item.get("url", "")
+                item.get(
+                    "url",
+                    ""
+                )
             )
 
             if not media_url:
@@ -972,10 +1162,13 @@ def fetch_instagram_html_media(url):
             ):
                 continue
 
-            seen.add(media_url)
+            seen.add(
+                media_url
+            )
 
             unique.append({
                 "url": media_url,
+
                 "type": item.get(
                     "type",
                     "image"
@@ -992,10 +1185,12 @@ def fetch_instagram_html_media(url):
 
         downloaded = []
 
-        # لا ننزل عدد غير محدود من الروابط
+        # لا نحاول أكثر من 30 ملف
         for item in unique[:30]:
 
-            media_url = item["url"]
+            media_url = item[
+                "url"
+            ]
 
             media_type = item.get(
                 "type",
@@ -1004,21 +1199,25 @@ def fetch_instagram_html_media(url):
 
             is_video = (
                 media_type == "video"
-                or ".mp4" in media_url.lower()
+                or ".mp4"
+                in media_url.lower()
             )
 
             path = download_media_url(
                 media_url,
+
                 prefix=(
                     "ig_html_video"
                     if is_video
                     else "ig_html_image"
                 ),
+
                 default_ext=(
                     "mp4"
                     if is_video
                     else "jpg"
                 ),
+
                 is_video=is_video
             )
 
@@ -1044,12 +1243,16 @@ def fetch_instagram_html_media(url):
 
 
 # =========================================================
-# OG IMAGE FALLBACK
+# INSTAGRAM OG IMAGE FALLBACK
 # =========================================================
 
-def fetch_instagram_single_image(url):
+def fetch_instagram_single_image(
+    url
+):
 
-    clean = clean_url(url)
+    clean = clean_url(
+        url
+    )
 
     try:
 
@@ -1066,7 +1269,7 @@ def fetch_instagram_single_image(url):
         )
 
         logger.info(
-            f"Instagram page status: "
+            "Instagram page status: "
             f"{response.status_code}"
         )
 
@@ -1156,9 +1359,13 @@ def fetch_instagram_single_image(url):
 # TIKTOK
 # =========================================================
 
-def fetch_tiktok_media(url):
+def fetch_tiktok_media(
+    url
+):
 
-    clean = clean_url(url)
+    clean = clean_url(
+        url
+    )
 
     endpoint = (
         "https://www.tikwm.com/api/"
@@ -1166,7 +1373,9 @@ def fetch_tiktok_media(url):
 
     headers = {
         "User-Agent":
-            BROWSER_HEADERS["User-Agent"]
+            BROWSER_HEADERS[
+                "User-Agent"
+            ]
     }
 
     params = {
@@ -1188,7 +1397,7 @@ def fetch_tiktok_media(url):
         )
 
         logger.info(
-            f"TikTok API status: "
+            "TikTok API status: "
             f"{response.status_code}"
         )
 
@@ -1197,10 +1406,15 @@ def fetch_tiktok_media(url):
 
         data = response.json()
 
-        if not isinstance(data, dict):
+        if not isinstance(
+            data,
+            dict
+        ):
             return []
 
-        result = data.get("data")
+        result = data.get(
+            "data"
+        )
 
         if not isinstance(
             result,
@@ -1322,7 +1536,8 @@ def build_ytdlp_options(
 
         "merge_output_format": "mp4",
 
-        "ffmpeg_location": FFMPEG_PATH,
+        "ffmpeg_location":
+            FFMPEG_PATH,
 
         "noplaylist": False,
 
@@ -1363,7 +1578,9 @@ def build_ytdlp_options(
     return options
 
 
-def download_with_ytdlp(url):
+def download_with_ytdlp(
+    url
+):
 
     unique_id = uuid.uuid4().hex
 
@@ -1453,6 +1670,7 @@ def download_with_ytdlp(url):
                     )
 
             unique = []
+
             seen = set()
 
             for item in results:
@@ -1460,9 +1678,13 @@ def download_with_ytdlp(url):
                 if item[0] in seen:
                     continue
 
-                seen.add(item[0])
+                seen.add(
+                    item[0]
+                )
 
-                unique.append(item)
+                unique.append(
+                    item
+                )
 
             return unique
 
@@ -1551,6 +1773,134 @@ def download_with_ytdlp(url):
 
 
 # =========================================================
+# CONVERT IMAGE TO JPG
+# =========================================================
+
+def convert_image_to_jpg(
+    path
+):
+
+    if not os.path.exists(
+        path
+    ):
+        return None
+
+    try:
+
+        extension = (
+            os.path.splitext(
+                path
+            )[1]
+            .lower()
+        )
+
+        # JPG/JPEG already supported
+        if extension in [
+            ".jpg",
+            ".jpeg"
+        ]:
+
+            return path
+
+        jpg_path = (
+            os.path.splitext(
+                path
+            )[0]
+            + "_telegram.jpg"
+        )
+
+        with Image.open(
+            path
+        ) as image:
+
+            # Fix EXIF rotation
+            image = ImageOps.exif_transpose(
+                image
+            )
+
+            # Convert transparency
+            if image.mode in [
+                "RGBA",
+                "LA",
+                "P"
+            ]:
+
+                if image.mode == "P":
+
+                    image = image.convert(
+                        "RGBA"
+                    )
+
+                background = Image.new(
+                    "RGB",
+                    image.size,
+                    "white"
+                )
+
+                if image.mode in [
+                    "RGBA",
+                    "LA"
+                ]:
+
+                    alpha = image.getchannel(
+                        "A"
+                    )
+
+                    background.paste(
+                        image,
+                        mask=alpha
+                    )
+
+                    image = background
+
+                else:
+
+                    image = image.convert(
+                        "RGB"
+                    )
+
+            else:
+
+                image = image.convert(
+                    "RGB"
+                )
+
+            # Save JPEG
+            image.save(
+                jpg_path,
+                "JPEG",
+                quality=92,
+                optimize=True
+            )
+
+        if (
+            os.path.exists(
+                jpg_path
+            )
+            and os.path.getsize(
+                jpg_path
+            ) > 0
+        ):
+
+            logger.info(
+                "Converted image to JPG: "
+                f"{jpg_path}"
+            )
+
+            return jpg_path
+
+        return None
+
+    except Exception as e:
+
+        logger.error(
+            f"Image conversion failed: {e}"
+        )
+
+        return None
+
+
+# =========================================================
 # TELEGRAM SEND
 # =========================================================
 
@@ -1562,132 +1912,92 @@ async def send_media_items(
     if not media_items:
         return False
 
-    valid_items = []
+    prepared_items = []
+
+    generated_files = []
+
+    # =====================================================
+    # PREPARE FILES
+    # =====================================================
 
     for path, is_video in media_items:
 
-        if not os.path.exists(path):
+        if not os.path.exists(
+            path
+        ):
             continue
 
-        if os.path.getsize(path) <= 0:
+        if os.path.getsize(
+            path
+        ) <= 0:
             continue
 
-        valid_items.append(
+        # ---------------------------------------------
+        # VIDEO
+        # ---------------------------------------------
+
+        if is_video:
+
+            prepared_items.append(
+                (
+                    path,
+                    True
+                )
+            )
+
+            continue
+
+        # ---------------------------------------------
+        # IMAGE
+        # ---------------------------------------------
+
+        jpg_path = convert_image_to_jpg(
+            path
+        )
+
+        if not jpg_path:
+            continue
+
+        if jpg_path != path:
+
+            generated_files.append(
+                jpg_path
+            )
+
+        prepared_items.append(
             (
-                path,
-                is_video
+                jpg_path,
+                False
             )
         )
 
-    if not valid_items:
+    if not prepared_items:
+
         return False
 
-    # Telegram media groups max 10
-    for start in range(
-        0,
-        len(valid_items),
-        10
-    ):
+    try:
 
-        batch = valid_items[
-            start:start + 10
-        ]
+        # =================================================
+        # SEND IN GROUPS OF 10
+        # =================================================
 
-        # -------------------------------------------------
-        # SINGLE FILE
-        # -------------------------------------------------
+        for start in range(
+            0,
+            len(prepared_items),
+            10
+        ):
 
-        if len(batch) == 1:
+            batch = prepared_items[
+                start:start + 10
+            ]
 
-            path, is_video = batch[0]
+            # =============================================
+            # SINGLE FILE
+            # =============================================
 
-            try:
+            if len(batch) == 1:
 
-                if is_video:
-
-                    await message.reply_video(
-                        video=path,
-                        supports_streaming=True
-                    )
-
-                else:
-
-                    size = os.path.getsize(
-                        path
-                    )
-
-                    if size <= 10 * 1024 * 1024:
-
-                        await message.reply_photo(
-                            photo=path
-                        )
-
-                    else:
-
-                        await message.reply_document(
-                            document=path
-                        )
-
-                continue
-
-            except Exception as e:
-
-                logger.error(
-                    "Single Telegram upload "
-                    f"failed: {e}"
-                )
-
-                return False
-
-        # -------------------------------------------------
-        # MEDIA GROUP
-        # -------------------------------------------------
-
-        media_group = []
-
-        for path, is_video in batch:
-
-            try:
-
-                if is_video:
-
-                    media_group.append(
-                        InputMediaVideo(
-                            media=path
-                        )
-                    )
-
-                else:
-
-                    media_group.append(
-                        InputMediaPhoto(
-                            media=path
-                        )
-                    )
-
-            except Exception as e:
-
-                logger.error(
-                    f"Creating media failed: {e}"
-                )
-
-        if not media_group:
-            continue
-
-        try:
-
-            await message.reply_media_group(
-                media=media_group
-            )
-
-        except Exception as e:
-
-            logger.error(
-                f"Media group upload failed: {e}"
-            )
-
-            # fallback
-            for path, is_video in batch:
+                path, is_video = batch[0]
 
                 try:
 
@@ -1700,11 +2010,17 @@ async def send_media_items(
 
                     else:
 
-                        size = os.path.getsize(
-                            path
+                        file_size = (
+                            os.path.getsize(
+                                path
+                            )
                         )
 
-                        if size <= 10 * 1024 * 1024:
+                        # Telegram photo upload
+                        # if reasonably sized
+                        if file_size <= (
+                            10 * 1024 * 1024
+                        ):
 
                             await message.reply_photo(
                                 photo=path
@@ -1712,22 +2028,202 @@ async def send_media_items(
 
                         else:
 
+                            # Large image:
+                            # send as document
                             await message.reply_document(
                                 document=path
                             )
 
-                except Exception as fallback_error:
+                except Exception as e:
 
                     logger.error(
-                        "Fallback upload failed: "
-                        f"{fallback_error}"
+                        "Single Telegram upload "
+                        f"failed: {e}"
                     )
 
-    return True
+                    return False
+
+                continue
+
+            # =============================================
+            # MEDIA GROUP
+            # =============================================
+
+            media_group = []
+
+            group_fallback = []
+
+            for path, is_video in batch:
+
+                try:
+
+                    # Photos larger than 10MB cannot
+                    # safely go as Telegram photo.
+                    if not is_video:
+
+                        if (
+                            os.path.getsize(
+                                path
+                            )
+                            > 10 * 1024 * 1024
+                        ):
+
+                            group_fallback.append(
+                                (
+                                    path,
+                                    is_video
+                                )
+                            )
+
+                            continue
+
+                    if is_video:
+
+                        media_group.append(
+                            InputMediaVideo(
+                                media=path
+                            )
+                        )
+
+                    else:
+
+                        media_group.append(
+                            InputMediaPhoto(
+                                media=path
+                            )
+                        )
+
+                except Exception as e:
+
+                    logger.error(
+                        "Creating Telegram media "
+                        f"failed: {e}"
+                    )
+
+            # =============================================
+            # SEND GROUP
+            # =============================================
+
+            if media_group:
+
+                try:
+
+                    await message.reply_media_group(
+                        media=media_group
+                    )
+
+                except Exception as e:
+
+                    logger.error(
+                        "Media group upload failed: "
+                        f"{e}"
+                    )
+
+                    # Fallback one by one
+                    for path, is_video in batch:
+
+                        try:
+
+                            if is_video:
+
+                                await message.reply_video(
+                                    video=path,
+                                    supports_streaming=True
+                                )
+
+                            else:
+
+                                if (
+                                    os.path.getsize(
+                                        path
+                                    )
+                                    <= 10 * 1024 * 1024
+                                ):
+
+                                    await message.reply_photo(
+                                        photo=path
+                                    )
+
+                                else:
+
+                                    await message.reply_document(
+                                        document=path
+                                    )
+
+                        except Exception as fallback_error:
+
+                            logger.error(
+                                "Fallback upload failed: "
+                                f"{fallback_error}"
+                            )
+
+                            return False
+
+            # =============================================
+            # LARGE FILES NOT INCLUDED IN GROUP
+            # =============================================
+
+            for path, is_video in group_fallback:
+
+                try:
+
+                    if is_video:
+
+                        await message.reply_video(
+                            video=path,
+                            supports_streaming=True
+                        )
+
+                    else:
+
+                        await message.reply_document(
+                            document=path
+                        )
+
+                except Exception as e:
+
+                    logger.error(
+                        "Large media upload failed: "
+                        f"{e}"
+                    )
+
+                    return False
+
+        return True
+
+    finally:
+
+        # =================================================
+        # DELETE GENERATED JPG FILES
+        # =================================================
+
+        for generated_file in generated_files:
+
+            try:
+
+                if os.path.exists(
+                    generated_file
+                ):
+
+                    os.remove(
+                        generated_file
+                    )
+
+                    logger.info(
+                        "Deleted converted file: "
+                        f"{generated_file}"
+                    )
+
+            except Exception as e:
+
+                logger.warning(
+                    "Could not delete converted "
+                    f"file: {e}"
+                )
 
 
 # =========================================================
-# CLEANUP
+# CLEANUP ORIGINAL FILES
 # =========================================================
 
 def cleanup_files(
@@ -1742,10 +2238,14 @@ def cleanup_files(
 
             if (
                 path
-                and os.path.exists(path)
+                and os.path.exists(
+                    path
+                )
             ):
 
-                os.remove(path)
+                os.remove(
+                    path
+                )
 
                 logger.info(
                     f"Deleted: {path}"
@@ -1759,11 +2259,13 @@ def cleanup_files(
 
 
 # =========================================================
-# START
+# START COMMAND
 # =========================================================
 
 @app.on_message(
-    filters.command("start")
+    filters.command(
+        "start"
+    )
 )
 async def start_handler(
     client,
@@ -1782,11 +2284,13 @@ async def start_handler(
 
 
 # =========================================================
-# HELP
+# HELP COMMAND
 # =========================================================
 
 @app.on_message(
-    filters.command("help")
+    filters.command(
+        "help"
+    )
 )
 async def help_handler(
     client,
@@ -1825,7 +2329,14 @@ async def download_handler(
     message: Message
 ):
 
-    raw_text = message.text.strip()
+    raw_text = (
+        message.text
+        .strip()
+    )
+
+    # =====================================================
+    # FIND URL
+    # =====================================================
 
     match = re.search(
         r"https?://[^\s]+",
@@ -1840,14 +2351,22 @@ async def download_handler(
 
         return
 
-    url = match.group(0)
+    url = match.group(
+        0
+    )
 
     url = url.rstrip(
         ".,!?)]}>\"'"
     )
 
-    status_message = await message.reply_text(
-        "⏳ جاري معالجة الرابط..."
+    # =====================================================
+    # STATUS
+    # =====================================================
+
+    status_message = (
+        await message.reply_text(
+            "⏳ جاري معالجة الرابط..."
+        )
     )
 
     media_items = []
@@ -1860,20 +2379,24 @@ async def download_handler(
         # INSTAGRAM
         # =================================================
 
-        if is_instagram_url(url):
+        if is_instagram_url(
+            url
+        ):
 
-            # -------------------------------------------------
-            # 1. RAPIDAPI
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # RAPIDAPI
+            # ---------------------------------------------
 
             await status_message.edit_text(
                 "📸 جاري استخراج محتوى Instagram..."
             )
 
-            media_items = await loop.run_in_executor(
-                None,
-                fetch_instagram_media,
-                url
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    fetch_instagram_media,
+                    url
+                )
             )
 
             if media_items:
@@ -1883,9 +2406,11 @@ async def download_handler(
                     "جاري رفعه..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -1895,15 +2420,14 @@ async def download_handler(
                 else:
 
                     await status_message.edit_text(
-                        "❌ حدث خطأ أثناء رفع "
-                        "المحتوى."
+                        "❌ حدث خطأ أثناء رفع المحتوى."
                     )
 
                 return
 
-            # -------------------------------------------------
-            # 2. HTML / JSON
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # HTML / JSON
+            # ---------------------------------------------
 
             logger.warning(
                 "RapidAPI returned no media. "
@@ -1914,10 +2438,12 @@ async def download_handler(
                 "🔎 جاري البحث داخل بيانات Instagram..."
             )
 
-            media_items = await loop.run_in_executor(
-                None,
-                fetch_instagram_html_media,
-                url
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    fetch_instagram_html_media,
+                    url
+                )
             )
 
             if media_items:
@@ -1927,9 +2453,11 @@ async def download_handler(
                     "جاري رفعه..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -1944,9 +2472,9 @@ async def download_handler(
 
                 return
 
-            # -------------------------------------------------
-            # 3. OG IMAGE
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # OG IMAGE
+            # ---------------------------------------------
 
             logger.warning(
                 "HTML/JSON returned no media. "
@@ -1957,10 +2485,12 @@ async def download_handler(
                 "🖼️ جاري محاولة استخراج الصورة..."
             )
 
-            media_items = await loop.run_in_executor(
-                None,
-                fetch_instagram_single_image,
-                url
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    fetch_instagram_single_image,
+                    url
+                )
             )
 
             if media_items:
@@ -1970,9 +2500,11 @@ async def download_handler(
                     "جاري رفعها..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -1987,9 +2519,9 @@ async def download_handler(
 
                 return
 
-            # -------------------------------------------------
-            # 4. YT-DLP
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # YT-DLP
+            # ---------------------------------------------
 
             logger.warning(
                 "Instagram extraction failed. "
@@ -2000,10 +2532,12 @@ async def download_handler(
                 "🎬 جاري محاولة استخراج الفيديو..."
             )
 
-            media_items = await loop.run_in_executor(
-                None,
-                download_with_ytdlp,
-                url
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    download_with_ytdlp,
+                    url
+                )
             )
 
             if media_items:
@@ -2012,9 +2546,11 @@ async def download_handler(
                     "🚀 تم التحميل، جاري الرفع..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -2042,17 +2578,24 @@ async def download_handler(
         # TIKTOK
         # =================================================
 
-        if is_tiktok_url(url):
+        if is_tiktok_url(
+            url
+        ):
 
             await status_message.edit_text(
                 "🎵 جاري استخراج محتوى TikTok..."
             )
 
-            # صور TikTok
-            media_items = await loop.run_in_executor(
-                None,
-                fetch_tiktok_media,
-                url
+            # ---------------------------------------------
+            # TIKTOK IMAGES
+            # ---------------------------------------------
+
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    fetch_tiktok_media,
+                    url
+                )
             )
 
             if media_items:
@@ -2062,9 +2605,11 @@ async def download_handler(
                     "جاري رفعها..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -2079,15 +2624,20 @@ async def download_handler(
 
                 return
 
-            # فيديو TikTok
+            # ---------------------------------------------
+            # TIKTOK VIDEO
+            # ---------------------------------------------
+
             await status_message.edit_text(
                 "🎬 جاري تحميل فيديو TikTok..."
             )
 
-            media_items = await loop.run_in_executor(
-                None,
-                download_with_ytdlp,
-                url
+            media_items = (
+                await loop.run_in_executor(
+                    None,
+                    download_with_ytdlp,
+                    url
+                )
             )
 
             if media_items:
@@ -2097,9 +2647,11 @@ async def download_handler(
                     "جاري رفعه..."
                 )
 
-                success = await send_media_items(
-                    message,
-                    media_items
+                success = (
+                    await send_media_items(
+                        message,
+                        media_items
+                    )
                 )
 
                 if success:
@@ -2128,10 +2680,12 @@ async def download_handler(
             "🎬 جاري تحميل المحتوى..."
         )
 
-        media_items = await loop.run_in_executor(
-            None,
-            download_with_ytdlp,
-            url
+        media_items = (
+            await loop.run_in_executor(
+                None,
+                download_with_ytdlp,
+                url
+            )
         )
 
         if media_items:
@@ -2140,9 +2694,11 @@ async def download_handler(
                 "🚀 تم التحميل، جاري الرفع..."
             )
 
-            success = await send_media_items(
-                message,
-                media_items
+            success = (
+                await send_media_items(
+                    message,
+                    media_items
+                )
             )
 
             if success:
@@ -2162,6 +2718,10 @@ async def download_handler(
             "تأكد أن الرابط عام ويعمل في المتصفح."
         )
 
+    # =====================================================
+    # GLOBAL ERROR
+    # =====================================================
+
     except Exception as e:
 
         logger.exception(
@@ -2177,6 +2737,10 @@ async def download_handler(
         except Exception:
             pass
 
+    # =====================================================
+    # CLEANUP
+    # =====================================================
+
     finally:
 
         if media_items:
@@ -2187,7 +2751,7 @@ async def download_handler(
 
 
 # =========================================================
-# RUN BOT
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
