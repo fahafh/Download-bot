@@ -486,43 +486,8 @@ def download_with_ytdlp(url, folder):
                 download=True
             )
 
-            requested = info.get(
-                "requested_downloads",
-                []
-            )
-
-            files = []
-
-            for item in requested:
-                path = item.get("_filename")
-
-                if path and os.path.exists(path):
-                    files.append(path)
-
-            if files:
-                return files
-
-    except Exception as e:
-        log.warning(
-            "yt-dlp error: %s",
-            e
-        )
-
-    # Fallback: scan only this job folder
-    files = []
-
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-
-        if os.path.isfile(path):
-            if is_video_file(path) or is_image_file(path):
-                files.append(path)
-
-    return files
-
-
-# =========================
-# SEND MEDIA
+            # =========================
+# SEND MEDIA - STABLE VERSION
 # =========================
 
 async def send_files(message, files):
@@ -532,10 +497,13 @@ async def send_files(message, files):
         if not os.path.exists(path):
             continue
 
-        if file_size(path) <= 0:
+        size = file_size(path)
+
+        if size <= 0:
             continue
 
-        if file_size(path) > MAX_FILE_SIZE:
+        if size > MAX_FILE_SIZE:
+            log.warning("File too large: %s (%s bytes)", path, size)
             continue
 
         valid.append(path)
@@ -543,32 +511,76 @@ async def send_files(message, files):
     if not valid:
         return False
 
-    # One file
-    if len(valid) == 1:
-        path = valid[0]
+    sent_any = False
 
-        if is_video_file(path):
-            await message.reply_video(
-                path,
-                supports_streaming=True
+    # Send files one-by-one instead of send_media_group.
+    # This avoids Telegram FILE_PART_0_MISSING errors
+    # that can happen while uploading multiple files together.
+    for path in valid:
+        try:
+            log.info(
+                "Sending file: %s (%s bytes)",
+                os.path.basename(path),
+                file_size(path)
             )
-            return True
 
-        if is_image_file(path):
-            # Telegram photos have a smaller practical limit
-            if file_size(path) <= 10 * 1024 * 1024:
-                await message.reply_photo(path)
+            if is_video_file(path):
+                await message.reply_video(
+                    path,
+                    supports_streaming=True
+                )
+
+            elif is_image_file(path):
+                # Telegram photo upload
+                if file_size(path) <= 10 * 1024 * 1024:
+                    await message.reply_photo(path)
+                else:
+                    await message.reply_document(path)
+
             else:
                 await message.reply_document(path)
 
-            return True
+            sent_any = True
 
-        await message.reply_document(path)
-        return True
+            # Small delay between uploads
+            await asyncio.sleep(0.5)
 
-    # Multiple images
-    photos = [
-        p for p in valid
+        except Exception as e:
+            log.exception(
+                "Send file error for %s: %s",
+                path,
+                e
+            )
+
+            # Retry once
+            try:
+                await asyncio.sleep(1)
+
+                if is_video_file(path):
+                    await message.reply_video(
+                        path,
+                        supports_streaming=True
+                    )
+
+                elif is_image_file(path):
+                    if file_size(path) <= 10 * 1024 * 1024:
+                        await message.reply_photo(path)
+                    else:
+                        await message.reply_document(path)
+
+                else:
+                    await message.reply_document(path)
+
+                sent_any = True
+
+            except Exception as retry_error:
+                log.exception(
+                    "Retry failed for %s: %s",
+                    path,
+                    retry_error
+                )
+
+    return sent_any
         if is_image_file(p)
         and file_size(p) <= 10 * 1024 * 1024
     ]
