@@ -3,4 +3,3 @@ tgcrypto
 yt-dlp
 requests
 imageio-ffmpeg
-Pillow
