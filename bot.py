@@ -490,6 +490,23 @@ def download_with_ytdlp(url, folder):
 # SEND MEDIA - STABLE VERSION
 # =========================
 
+    except Exception as e:
+        log.warning(
+            "yt-dlp error: %s",
+            e
+        )
+
+    # Fallback: scan only this job folder
+    files = []
+
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+
+        if os.path.isfile(path):
+            if is_video_file(path) or is_image_file(path):
+                files.append(path)
+
+    return files
 async def send_files(message, files):
     valid = []
 
