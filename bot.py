@@ -487,7 +487,7 @@ def download_with_ytdlp(url, folder):
             )
 
             # =========================
-# SEND MEDIA - STABLE VERSION
+    
 # =========================
 
     except Exception as e:
@@ -507,6 +507,9 @@ def download_with_ytdlp(url, folder):
                 files.append(path)
 
     return files
+    # =========================
+# SEND MEDIA - STABLE VERSION
+# =========================
 async def send_files(message, files):
     valid = []
 
