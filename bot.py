@@ -689,12 +689,12 @@ async def download_handler(client, message: Message):
         # TIKTOK
         # =====================
 
-    elif is_tiktok_url(url):
-        # Photo TikTok
-        if is_tiktok_photo(url):
-            files = await fetch_tiktok_photo(url, folder)
-            if files:
-                return files
+            elif is_tiktok_url(url):
+            # Photo TikTok
+            if is_tiktok_photo(url):
+                files = await fetch_tiktok_photo(url, folder)
+                if files:
+                    return files
 
                 # fallback
                 if not files:
