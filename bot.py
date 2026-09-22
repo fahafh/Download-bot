@@ -693,13 +693,9 @@ async def download_handler(client, message: Message):
 
             # Photo فقط يستخدم TikWM
             if is_tiktok_photo(url):
-
-                files = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    fetch_tiktok_photo,
-                    url,
-                    folder
-                )
+    files = await fetch_tiktok_photo(url, folder)
+    if files:
+        return files
 
                 # fallback
                 if not files:
