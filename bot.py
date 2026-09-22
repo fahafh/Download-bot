@@ -519,11 +519,7 @@ async def send_files(message, files):
 
         size = file_size(path)
 
-        if size <= 0:
-            continue
-
-        if size > MAX_FILE_SIZE:
-            log.warning("File too large: %s (%s bytes)", path, size)
+        if size <= 0 or size > MAX_FILE_SIZE:
             continue
 
         valid.append(path)
@@ -531,19 +527,36 @@ async def send_files(message, files):
     if not valid:
         return False
 
-    sent_any = False
+    photos = [
+        path for path in valid
+        if is_image_file(path) and file_size(path) <= 10 * 1024 * 1024
+    ]
 
-    # Send files one-by-one instead of send_media_group.
-    # This avoids Telegram FILE_PART_0_MISSING errors
-    # that can happen while uploading multiple files together.
-    for path in valid:
+    # إرسال الصور كألبوم واحد
+    if len(photos) >= 2 and len(photos) == len(valid):
         try:
-            log.info(
-                "Sending file: %s (%s bytes)",
-                os.path.basename(path),
-                file_size(path)
+            from pyrogram.types import InputMediaPhoto
+
+            media = [
+                InputMediaPhoto(path)
+                for path in photos
+            ]
+
+            await message.reply_media_group(media)
+
+            return True
+
+        except Exception as e:
+            log.exception(
+                "Media group error: %s",
+                e
             )
 
+    # Fallback: إرسال الملفات بشكل منفرد
+    sent_any = False
+
+    for path in valid:
+        try:
             if is_video_file(path):
                 await message.reply_video(
                     path,
@@ -551,7 +564,6 @@ async def send_files(message, files):
                 )
 
             elif is_image_file(path):
-                # Telegram photo upload
                 if file_size(path) <= 10 * 1024 * 1024:
                     await message.reply_photo(path)
                 else:
@@ -562,43 +574,12 @@ async def send_files(message, files):
 
             sent_any = True
 
-            # Small delay between uploads
-            await asyncio.sleep(0.5)
-
         except Exception as e:
             log.exception(
                 "Send file error for %s: %s",
                 path,
                 e
             )
-
-            # Retry once
-            try:
-                await asyncio.sleep(1)
-
-                if is_video_file(path):
-                    await message.reply_video(
-                        path,
-                        supports_streaming=True
-                    )
-
-                elif is_image_file(path):
-                    if file_size(path) <= 10 * 1024 * 1024:
-                        await message.reply_photo(path)
-                    else:
-                        await message.reply_document(path)
-
-                else:
-                    await message.reply_document(path)
-
-                sent_any = True
-
-            except Exception as retry_error:
-                log.exception(
-                    "Retry failed for %s: %s",
-                    path,
-                    retry_error
-                )
 
     return sent_any
 
