@@ -649,8 +649,7 @@ async def download_handler(client, message: Message):
 
     folder = create_job_folder()
 
-    try:
-
+        try:
         # =====================
         # INSTAGRAM
         # =====================
@@ -664,7 +663,6 @@ async def download_handler(client, message: Message):
                 folder
             )
 
-            # Fallback للصورة فقط
             if not files and "/p/" in url:
                 image = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -676,7 +674,6 @@ async def download_handler(client, message: Message):
                 if image:
                     files = [image]
 
-            # Final fallback
             if not files:
                 files = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -685,25 +682,32 @@ async def download_handler(client, message: Message):
                     folder
                 )
 
-# =====================
-# TIKTOK
-# =====================
-elif is_tiktok_url(url) and is_tiktok_photo(url):
-    files = await fetch_tiktok_photo(url, folder)
+        # =====================
+        # TIKTOK
+        # =====================
 
-elif is_tiktok_url(url):
-    files = await asyncio.get_running_loop().run_in_executor(
-        None,
-        download_with_ytdlp,
-        url,
-        folder
-)
+        elif is_tiktok_url(url):
+
+            if is_tiktok_photo(url):
+                files = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    fetch_tiktok_photo,
+                    url,
+                    folder
+                )
+            else:
+                files = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    download_with_ytdlp,
+                    url,
+                    folder
+                )
+
         # =====================
         # OTHER SITES
         # =====================
 
         else:
-
             files = await asyncio.get_running_loop().run_in_executor(
                 None,
                 download_with_ytdlp,
