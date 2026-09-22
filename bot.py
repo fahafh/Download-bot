@@ -692,10 +692,10 @@ async def download_handler(client, message: Message):
         elif is_tiktok_url(url):
 
             # Photo فقط يستخدم TikWM
-            if is_tiktok_photo(url):
-    files = await fetch_tiktok_photo(url, folder)
-    if files:
-        return files
+                    if is_tiktok_photo(url):
+            files = await fetch_tiktok_photo(url, folder)
+            if files:
+                return files
 
                 # fallback
                 if not files:
