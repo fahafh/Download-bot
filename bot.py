@@ -695,6 +695,13 @@ async def download_handler(client, message: Message):
                     url,
                     folder
                 )
+
+                if not files:
+                    await status.edit_text(
+                        "❌ تعذر استخراج صور TikTok من هذا الرابط."
+                    )
+                    return
+
             else:
                 files = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -702,6 +709,7 @@ async def download_handler(client, message: Message):
                     url,
                     folder
                 )
+
 
         # =====================
         # OTHER SITES
