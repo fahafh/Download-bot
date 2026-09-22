@@ -601,17 +601,6 @@ async def send_files(message, files):
                 )
 
     return sent_any
-        if is_image_file(p)
-        and file_size(p) <= 10 * 1024 * 1024
-    
-
-    if photos and len(photos) == len(valid):
-        try:
-            media = []
-
-            for p in photos:
-                from pyrogram.types import InputMediaPhoto
-                media.append(InputMediaPhoto(p))
 
             await message.reply_media_group(media)
             return True
