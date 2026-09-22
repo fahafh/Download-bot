@@ -602,39 +602,6 @@ async def send_files(message, files):
 
     return sent_any
 
-            await message.reply_media_group(media)
-            return True
-
-        except Exception as e:
-            log.warning(
-                "Media group error: %s",
-                e
-            )
-
-    # Fallback
-    for path in valid:
-        try:
-            if is_video_file(path):
-                await message.reply_video(
-                    path,
-                    supports_streaming=True
-                )
-            elif is_image_file(path):
-                if file_size(path) <= 10 * 1024 * 1024:
-                    await message.reply_photo(path)
-                else:
-                    await message.reply_document(path)
-            else:
-                await message.reply_document(path)
-
-        except Exception as e:
-            log.warning(
-                "Send file error: %s",
-                e
-            )
-
-    return True
-
 
 # =========================
 # COMMANDS
