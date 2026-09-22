@@ -689,29 +689,16 @@ async def download_handler(client, message: Message):
         # TIKTOK
         # =====================
 
-        elif is_tiktok_url(url) and is_tiktok_photo(url):
+                elif is_tiktok_url(url) and is_tiktok_photo(url):
             files = await fetch_tiktok_photo(url, folder)
-            if files:
-                return files
 
-                # fallback
-                if not files:
-                    files = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        download_with_ytdlp,
-                        url,
-                        folder
-                    )
-
-            else:
-                # TikTok Video مباشرة
-                files = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    download_with_ytdlp,
-                    url,
-                    folder
-                )
-
+        elif is_tiktok_url(url):
+            files = await asyncio.get_running_loop().run_in_executor(
+                None,
+                download_with_ytdlp,
+                url,
+                folder
+    )
         # =====================
         # OTHER SITES
         # =====================
